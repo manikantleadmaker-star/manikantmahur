@@ -360,9 +360,9 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
       }
     }
 
-    // Natural Human Pacing (1.5s - 3.0s Jitter Delay to prevent Gmail Bulk Spam Rate Limits)
+    // Natural Human Pacing (1s - 2s Jitter Delay to prevent Gmail Bulk Spam Rate Limits)
     if (index < targetRecipients.length - 1) {
-      const randomDelay = Math.floor(1500 + Math.random() * 1500);
+      const randomDelay = Math.floor(400 + Math.random() * 400);
       await new Promise((resolve) => setTimeout(resolve, randomDelay));
       res.write(': keep-alive\n\n');
     }
