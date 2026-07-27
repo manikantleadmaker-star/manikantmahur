@@ -1,6 +1,7 @@
+import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
 import nodemailer from 'nodemailer';
+import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -11,7 +12,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Universal CORS & Preflight Response Middleware (Prevents CORS Connection Block in Vercel)
+const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+
+// Enable CORS for all origins, headers, and preflight options
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -26,339 +30,391 @@ app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// 1. Health, Auth & Connection Check Endpoints (Satisfies all UI ping/password/verify calls)
-const handleHealthOrAuth = (req, res) => {
-  return res.status(200).json({
-    success: true,
-    authenticated: true,
-    ok: true,
-    status: 'ok',
-    message: 'Server connection active and verified',
-    timestamp: new Date().toISOString(),
-  });
-};
+// Global session stop flags & connection pool
+const activeSessions = {};
+const transporters = new Map();
 
-app.all([
-  '/api/health',
-  '/api/ping',
-  '/api/status',
-  '/api/check',
-  '/api/verify',
-  '/api/login',
-  '/api/auth',
-  '/api/verify-password',
-  '/api/check-auth',
-  '/api/validate',
-  '/api/connect',
-  '/health',
-  '/ping',
-  '/status',
-  '/verify',
-  '/login',
-  '/auth',
-], handleHealthOrAuth);
+/* ==========================================================================
+   TRANSPORTER POOLING (Reusable High-Performance SMTP Connection Pool)
+   ========================================================================== */
+function getTransporter(email, appPassword, options = {}) {
+  const cleanEmail = String(email || '').toLowerCase().trim();
+  let cleanPassword = String(appPassword || '').trim().replace(/\s+/g, '');
+  const cacheKey = `${cleanEmail}_${cleanPassword}`;
 
-// Helper function to extract plain text from HTML to optimize Spam Score and force INBOX delivery
-function stripHtml(html) {
+  if (!transporters.has(cacheKey)) {
+    const isGmail = options.service === 'gmail' || !options.host || String(options.host).includes('gmail');
+
+    let transporter;
+    if (isGmail) {
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: { user: cleanEmail, pass: cleanPassword },
+        pool: true,
+        maxConnections: 3,
+        maxMessages: 100,
+        tls: { rejectUnauthorized: false },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 12000,
+      });
+    } else {
+      transporter = nodemailer.createTransport({
+        host: options.host,
+        port: options.port ? Number(options.port) : 587,
+        secure: options.secure !== undefined ? Boolean(options.secure) : Number(options.port) === 465,
+        auth: { user: cleanEmail, pass: cleanPassword },
+        pool: true,
+        maxConnections: 3,
+        tls: { rejectUnauthorized: false },
+        connectionTimeout: 8000,
+      });
+    }
+
+    transporters.set(cacheKey, transporter);
+  }
+
+  return transporters.get(cacheKey);
+}
+
+/* ==========================================================================
+   SPINTAX PARSER ({Hi|Hello|Hey})
+   ========================================================================== */
+function parseSpintax(text) {
+  if (!text) return '';
+  let spun = String(text);
+  const regex = /{([^{}]+)}/g;
+  let iterations = 0;
+  while (regex.test(spun) && iterations < 15) {
+    spun = spun.replace(regex, (_, choices) => {
+      const options = choices.split('|');
+      return options[Math.floor(Math.random() * options.length)];
+    });
+    iterations++;
+  }
+  return spun;
+}
+
+/* ==========================================================================
+   CLEAN PLAIN-TEXT FALLBACK (Optimizes Spam Score for Direct Inbox Placement)
+   ========================================================================== */
+function convertHtmlToText(html) {
   if (!html) return '';
-  return html
-    .replace(/<style([\s\S]*?)<\/style>/gi, '')
-    .replace(/<script([\s\S]*?)<\/script>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
+  return String(html)
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\n\s*\n/g, '\n\n')
     .trim();
 }
 
-// Helper to create Nodemailer transport with multi-port fallback for Gmail & SMTP
-function createTransporter(senderEmail, senderPassword, account = {}) {
-  const isGmail = account.service === 'gmail' || !account.host || String(account.host).includes('gmail');
+/* ==========================================================================
+   HELPER: CLOUDFLARE TURNSTILE VERIFICATION
+   ========================================================================== */
+async function verifyTurnstile(token, ip) {
+  if (!TURNSTILE_SECRET_KEY || !token) return true;
 
-  if (isGmail) {
-    // Port 465 SSL with short timeouts for fast execution on Vercel
-    return nodemailer.createTransport({
-      service: 'gmail',
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: {
-        user: senderEmail,
-        pass: senderPassword,
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
-      connectionTimeout: 5000,
-      greetingTimeout: 5000,
-      socketTimeout: 8000,
+  try {
+    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        secret: TURNSTILE_SECRET_KEY,
+        response: token,
+        remoteip: ip || '',
+      }),
     });
+    const data = await response.json();
+    return Boolean(data.success);
+  } catch (error) {
+    console.error('Turnstile Verification Error:', error);
+    return true; // Graceful fallback
   }
-
-  // Custom SMTP configuration
-  return nodemailer.createTransport({
-    host: account.host,
-    port: account.port ? Number(account.port) : 587,
-    secure: account.secure !== undefined ? Boolean(account.secure) : Number(account.port) === 465,
-    auth: {
-      user: senderEmail,
-      pass: senderPassword,
-    },
-    tls: {
-      rejectUnauthorized: false,
-    },
-    connectionTimeout: 5000,
-    greetingTimeout: 5000,
-    socketTimeout: 8000,
-  });
 }
 
-// 2. Email Sending Endpoint (Handles single & bulk email dispatch across all possible route aliases)
-app.post([
-  '/api/send-emails',
-  '/api/send-email',
-  '/api/send',
-  '/api/mail',
-  '/api/bulk-send',
-  '/send-emails',
-  '/send-email',
-  '/send',
-  '/api/dispatch',
-  '/dispatch',
-], async (req, res) => {
+/* ==========================================================================
+   HEALTH & STATUS ROUTES
+   ========================================================================== */
+app.all(['/api/health', '/api/ping', '/api/status', '/health', '/ping'], (req, res) => {
+  return res.status(200).json({
+    success: true,
+    status: 'ok',
+    message: 'Bulk Email Service Online',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/* ==========================================================================
+   AUTHENTICATION & SMTP VERIFICATION ROUTES
+   ========================================================================== */
+app.post(['/api/auth', '/api/verify-password', '/api/login'], (req, res) => {
+  const { password } = req.body || {};
+  if (!password) {
+    return res.status(400).json({ success: false, message: 'Password is required' });
+  }
+  if (password === SITE_PASSWORD || password === 'Y##') {
+    return res.json({ success: true, message: 'Access granted' });
+  }
+  return res.status(401).json({ success: false, message: 'Incorrect password' });
+});
+
+app.post(['/api/verify', '/api/verify-smtp'], async (req, res) => {
+  const { email, appPassword, cfToken } = req.body || {};
+
+  if (!email || !appPassword) {
+    return res.status(400).json({ success: false, message: 'Email and App Password required' });
+  }
+
+  if (cfToken && TURNSTILE_SECRET_KEY) {
+    const isValidToken = await verifyTurnstile(cfToken, req.ip);
+    if (!isValidToken) {
+      return res.status(400).json({ success: false, message: 'Security check failed.' });
+    }
+  }
+
   try {
-    const body = req.body || {};
+    const transporter = getTransporter(email, appPassword);
+    await transporter.verify();
+    return res.json({ success: true, message: 'SMTP verified successfully' });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('SMTP Verification failed for:', email, errMsg);
+    return res.status(401).json({ success: false, message: 'Authentication failed. Check App Password.' });
+  }
+});
 
-    // --- Extract Sender Accounts ---
-    let senderAccounts = [];
+/* ==========================================================================
+   SSE STREAM ROUTE (REAL-TIME STREAMING EMAIL DISPATCH)
+   ========================================================================== */
+app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
-    if (Array.isArray(body.accounts) && body.accounts.length > 0) {
-      senderAccounts = body.accounts;
-    } else {
-      const rawEmail = body.email || body.gmail || body.yourGmail || body.user || body.senderEmail || body.from || body.account;
-      const rawPass = body.appPassword || body.app_password || body.appPass || body.password || body.pass;
-      const rawName = body.senderName || body.name || body.fromName || body.sender || '';
+  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken, accounts } = req.body || {};
 
-      if (rawEmail && rawPass) {
-        senderAccounts.push({
-          email: rawEmail,
-          appPassword: rawPass,
-          senderName: rawName,
-        });
-      }
+  // Resolve sender accounts array or single account
+  let senderAccounts = Array.isArray(accounts) && accounts.length > 0 ? accounts : [];
+  if (senderAccounts.length === 0 && email && appPassword) {
+    senderAccounts.push({ email, appPassword, senderName });
+  }
+
+  // Resolve recipients
+  let targetRecipients = Array.isArray(recipients) ? recipients : [];
+  if (targetRecipients.length === 0 && typeof recipients === 'string') {
+    targetRecipients = recipients.split(/[\n,;]+/).map((r) => r.trim()).filter(Boolean);
+  }
+
+  if (senderAccounts.length === 0 || targetRecipients.length === 0) {
+    res.write(`data: ${JSON.stringify({ success: false, error: 'Missing required sender credentials or recipients list' })}\n\n`);
+    res.end();
+    return;
+  }
+
+  if (cfToken && TURNSTILE_SECRET_KEY) {
+    const isValidToken = await verifyTurnstile(cfToken, req.ip);
+    if (!isValidToken) {
+      res.write(`data: ${JSON.stringify({ success: false, error: 'Turnstile verification failed' })}\n\n`);
+      res.end();
+      return;
+    }
+  }
+
+  activeSessions['global_stop'] = false;
+  let accountIndex = 0;
+
+  for (let index = 0; index < targetRecipients.length; index++) {
+    if (activeSessions['global_stop']) {
+      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by user' })}\n\n`);
+      break;
     }
 
-    if (senderAccounts.length === 0) {
-      return res.status(200).json({
-        success: false,
-        ok: false,
-        status: 'error',
-        error: 'Sender email and Gmail App Password are required.',
-        message: 'Sender email and Gmail App Password are required.',
-      });
-    }
+    const recipient = String(targetRecipients[index] || '').trim();
+    if (!recipient || !recipient.includes('@')) continue;
 
-    // --- Extract Recipients ---
-    const rawRecipients = body.recipients || body.recipient || body.to || body.emails || body.list || body.target;
-    let recipientList = [];
+    const currentAccount = senderAccounts[accountIndex % senderAccounts.length];
+    accountIndex++;
 
-    if (Array.isArray(rawRecipients)) {
-      recipientList = rawRecipients.flatMap((r) =>
-        typeof r === 'string' ? r.split(/[\n,;]+/) : []
-      );
-    } else if (typeof rawRecipients === 'string') {
-      recipientList = rawRecipients.split(/[\n,;]+/);
-    }
+    const accEmail = String(currentAccount.email || currentAccount.user || email || '').trim();
+    const accPass = String(currentAccount.appPassword || currentAccount.pass || appPassword || '').trim();
+    const accSenderName = String(currentAccount.senderName || currentAccount.name || senderName || '').trim();
 
-    recipientList = recipientList
-      .map((e) => (typeof e === 'string' ? e.trim() : ''))
-      .filter((e) => e.length > 0 && e.includes('@'));
+    // Send HTTP keep-alive ping frame
+    res.write(': keep-alive\n\n');
 
-    if (recipientList.length === 0) {
-      return res.status(200).json({
-        success: false,
-        ok: false,
-        status: 'error',
-        error: 'Valid recipient email list is required.',
-        message: 'Valid recipient email list is required.',
-      });
-    }
+    try {
+      const transporter = getTransporter(accEmail, accPass, currentAccount);
+      const spunSubject = parseSpintax(subject || 'No Subject');
+      const spunBody = parseSpintax(messageBody || '');
+      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-    // --- Extract Subject and Message Body ---
-    const subject = body.subject || body.emailSubject || body.title || 'No Subject';
-    const messageContent = body.body || body.message || body.content || body.text || body.html || body.messageBody || '';
+      const formattedFrom = accSenderName ? `"${accSenderName.replace(/"/g, '')}" <${accEmail}>` : accEmail;
 
-    if (!messageContent || !messageContent.trim()) {
-      return res.status(200).json({
-        success: false,
-        ok: false,
-        status: 'error',
-        error: 'Email message body is required.',
-        message: 'Email message body is required.',
-      });
-    }
-
-    const isHtmlBody = Boolean(body.isHtml || body.html || /<[a-z][\s\S]*>/i.test(messageContent));
-    const delayMs = Math.min(Math.max(Number(body.delayMs || body.delay || 50), 0), 500);
-
-    const results = [];
-    let accountIndex = 0;
-
-    // --- Process Email Sending ---
-    for (let i = 0; i < recipientList.length; i++) {
-      const recipient = recipientList[i];
-      const account = senderAccounts[accountIndex % senderAccounts.length];
-      accountIndex++;
-
-      const senderEmail = String(account.email || account.user || '').trim();
-      let senderPassword = String(account.appPassword || account.pass || account.password || '').trim();
-      
-      // Clean app password (remove spaces copy-pasted from Google Security Settings)
-      senderPassword = senderPassword.replace(/\s+/g, '');
-      const senderName = account.senderName || account.name || '';
-
-      if (!senderEmail || !senderPassword) {
-        results.push({
-          recipient,
-          sender: senderEmail || 'unknown',
-          status: 'failed',
-          error: 'Missing sender email or App Password.',
-        });
-        continue;
-      }
-
-      // Create primary transporter
-      let transporter = createTransporter(senderEmail, senderPassword, account);
-
-      // Construct headers optimized for direct Primary Inbox placement
-      const formattedFrom = senderName.trim() ? `"${senderName.trim()}" <${senderEmail}>` : senderEmail;
-      
       const mailOptions = {
         from: formattedFrom,
         to: recipient,
-        subject: subject,
-        replyTo: senderEmail,
+        subject: spunSubject,
+        replyTo: accEmail,
         headers: {
-          'X-Mailer': 'Google Mailer Console',
+          'X-Mailer': 'Secure Mailer',
           'X-Priority': '1',
           'X-MSMail-Priority': 'High',
           'Importance': 'High',
         },
       };
 
-      if (isHtmlBody) {
-        mailOptions.html = messageContent;
-        mailOptions.text = stripHtml(messageContent);
+      if (isHtml) {
+        mailOptions.html = spunBody;
+        mailOptions.text = convertHtmlToText(spunBody);
       } else {
-        mailOptions.text = messageContent;
+        mailOptions.text = spunBody;
+      }
+
+      await transporter.sendMail(mailOptions);
+      res.write(`data: ${JSON.stringify({ success: true, recipient, sender: accEmail })}\n\n`);
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error(`Error sending to ${recipient} via ${accEmail}:`, errMsg);
+      res.write(`data: ${JSON.stringify({ success: false, recipient, sender: accEmail, error: errMsg })}\n\n`);
+    }
+
+    // Natural pacing with keep-alive pings between emails
+    if (index < targetRecipients.length - 1) {
+      const randomDelay = Math.floor(800 + Math.random() * 800); // 0.8s - 1.6s safe pace
+      await new Promise((resolve) => setTimeout(resolve, randomDelay));
+      res.write(': keep-alive\n\n');
+    }
+  }
+
+  res.write('data: [DONE]\n\n');
+  res.end();
+});
+
+/* ==========================================================================
+   STANDARD JSON BULK EMAIL DISPATCH ENDPOINT
+   ========================================================================== */
+app.post(['/api/send-emails', '/api/send-email', '/api/send', '/send-emails', '/send-email'], async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { email, appPassword, senderName, subject, messageBody, body: rawBody, recipients } = body;
+
+    let senderAccounts = Array.isArray(body.accounts) && body.accounts.length > 0 ? body.accounts : [];
+    if (senderAccounts.length === 0 && (email || body.user)) {
+      senderAccounts.push({
+        email: email || body.user,
+        appPassword: appPassword || body.pass || body.password,
+        senderName: senderName || body.name,
+      });
+    }
+
+    let targetRecipients = Array.isArray(recipients) ? recipients : [];
+    if (targetRecipients.length === 0 && typeof recipients === 'string') {
+      targetRecipients = recipients.split(/[\n,;]+/).map((r) => r.trim()).filter(Boolean);
+    }
+
+    if (senderAccounts.length === 0 || targetRecipients.length === 0) {
+      return res.status(200).json({ success: false, message: 'Missing sender account or recipients list' });
+    }
+
+    const content = messageBody || rawBody || body.message || '';
+    const results = [];
+    let accountIndex = 0;
+
+    for (let i = 0; i < targetRecipients.length; i++) {
+      const recipient = targetRecipients[i];
+      const acc = senderAccounts[accountIndex % senderAccounts.length];
+      accountIndex++;
+
+      const accEmail = acc.email || acc.user;
+      const accPass = acc.appPassword || acc.pass || acc.password;
+
+      if (!accEmail || !accPass) {
+        results.push({ recipient, status: 'failed', error: 'Missing credentials' });
+        continue;
       }
 
       try {
-        const info = await transporter.sendMail(mailOptions);
-        results.push({
-          recipient,
-          sender: senderEmail,
-          status: 'success',
-          messageId: info.messageId,
-        });
-      } catch (primaryErr) {
-        const errMsg = primaryErr instanceof Error ? primaryErr.message : 'SMTP delivery failed';
-        console.error(`Primary send failed to ${recipient} via ${senderEmail}:`, errMsg);
+        const transporter = getTransporter(accEmail, accPass, acc);
+        const spunSubject = parseSpintax(subject || 'No Subject');
+        const spunBody = parseSpintax(content);
+        const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
 
-        // Backup retry using STARTTLS Port 587
-        try {
-          const fallbackTransporter = nodemailer.createTransport({
-            host: 'smtp.gmail.com',
-            port: 587,
-            secure: false,
-            requireTLS: true,
-            auth: { user: senderEmail, pass: senderPassword },
-            tls: { rejectUnauthorized: false },
-            connectionTimeout: 5000,
-          });
-          const fallbackInfo = await fallbackTransporter.sendMail(mailOptions);
-          results.push({
-            recipient,
-            sender: senderEmail,
-            status: 'success',
-            messageId: fallbackInfo.messageId,
-          });
-        } catch (fallbackErr) {
-          results.push({
-            recipient,
-            sender: senderEmail,
-            status: 'failed',
-            error: errMsg,
-          });
+        const mailOptions = {
+          from: acc.senderName ? `"${acc.senderName}" <${accEmail}>` : accEmail,
+          to: recipient,
+          subject: spunSubject,
+          replyTo: accEmail,
+        };
+
+        if (isHtml) {
+          mailOptions.html = spunBody;
+          mailOptions.text = convertHtmlToText(spunBody);
+        } else {
+          mailOptions.text = spunBody;
         }
-      }
 
-      // Small throttling delay between recipients
-      if (i < recipientList.length - 1 && delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const info = await transporter.sendMail(mailOptions);
+        results.push({ recipient, status: 'success', sender: accEmail, messageId: info.messageId });
+      } catch (err) {
+        results.push({ recipient, status: 'failed', sender: accEmail, error: err.message });
       }
     }
 
-    const successCount = results.filter((r) => r.status === 'success').length;
-    const failedCount = results.filter((r) => r.status === 'failed').length;
-
-    return res.status(200).json({
-      success: successCount > 0,
-      ok: successCount > 0,
-      status: successCount > 0 ? 'success' : 'failed',
-      message: successCount > 0 ? 'Emails sent successfully' : 'Failed to send emails. Check App Password.',
-      total: recipientList.length,
-      sent: successCount,
-      failed: failedCount,
-      successCount,
-      failedCount,
+    const sentCount = results.filter((r) => r.status === 'success').length;
+    return res.json({
+      success: sentCount > 0,
+      sent: sentCount,
+      failed: results.length - sentCount,
       results,
     });
   } catch (error) {
-    console.error('Fatal Server Dispatch Error:', error);
-    return res.status(200).json({
-      success: false,
-      ok: false,
-      status: 'error',
-      error: 'Server error: ' + (error instanceof Error ? error.message : String(error)),
-      message: 'Server error: ' + (error instanceof Error ? error.message : String(error)),
-    });
+    return res.status(200).json({ success: false, error: error.message });
   }
 });
 
-// Static Asset & Route Fallback Handler
-const distPath = path.join(process.cwd(), 'dist');
-const publicPath = path.join(process.cwd(), 'public');
+/* ==========================================================================
+   STOP PROCESS ROUTE
+   ========================================================================== */
+app.post(['/api/stop', '/stop'], (req, res) => {
+  activeSessions['global_stop'] = true;
+  return res.json({ success: true, message: 'Stop process registered' });
+});
 
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-}
+/* ==========================================================================
+   STATIC ASSETS & FRONTEND FALLBACK ROUTE
+   ========================================================================== */
+const publicPath = path.join(__dirname, 'public');
+const distPath = path.join(process.cwd(), 'dist');
+
 if (fs.existsSync(publicPath)) {
   app.use(express.static(publicPath));
 }
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
 
-// Catch-all Middleware Error Handler
-app.use((err, req, res, next) => {
-  console.error('Unhandled Server Error:', err);
-  res.status(200).json({
-    success: false,
-    ok: false,
-    status: 'error',
-    error: err.message || 'Internal Server Error',
-    message: err.message || 'Internal Server Error',
-  });
-});
-
-// Fallback Route Handler
 app.get('*', (req, res) => {
-  const distHtml = path.join(distPath, 'index.html');
-  const publicHtml = path.join(publicPath, 'index.html');
-  const rootHtml = path.join(process.cwd(), 'index.html');
+  const publicIndex = path.join(publicPath, 'index.html');
+  const distIndex = path.join(distPath, 'index.html');
+  const rootIndex = path.join(process.cwd(), 'index.html');
 
-  if (fs.existsSync(distHtml)) {
-    return res.sendFile(distHtml);
-  } else if (fs.existsSync(publicHtml)) {
-    return res.sendFile(publicHtml);
-  } else if (fs.existsSync(rootHtml)) {
-    return res.sendFile(rootHtml);
+  if (fs.existsSync(publicIndex)) {
+    return res.sendFile(publicIndex);
+  } else if (fs.existsSync(distIndex)) {
+    return res.sendFile(distIndex);
+  } else if (fs.existsSync(rootIndex)) {
+    return res.sendFile(rootIndex);
   }
 
   return res.status(200).send(`
@@ -377,17 +433,21 @@ app.get('*', (req, res) => {
       <body>
         <div class="card">
           <h1>Bulk Email Sender API</h1>
-          <p>Status: <span class="status">Online & Operational</span></p>
+          <p>Status: <span class="status">Online & Fully Operational</span></p>
           <p>Endpoints Ready:</p>
-          <p><code>POST /api/send-emails</code> - Send Emails via Gmail App Password</p>
-          <p><code>ALL /api/health</code> - Server Health Check</p>
+          <p><code>POST /api/auth</code> - Password Check (Default: Y##)</p>
+          <p><code>POST /api/verify</code> - Verify SMTP / App Password</p>
+          <p><code>POST /api/send-stream</code> - Real-time SSE Email Dispatch</p>
+          <p><code>POST /api/stop</code> - Cancel ongoing batch</p>
         </div>
       </body>
     </html>
   `);
 });
 
-// Standalone Node.js server execution (when not running in Vercel serverless container)
+/* ==========================================================================
+   STANDALONE SERVER LISTENER / VERCEL EXPORT
+   ========================================================================== */
 if (!process.env.VERCEL) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
