@@ -1,245 +1,152 @@
-import 'dotenv/config';
 import express from 'express';
-import nodemailer from 'nodemailer';
 import cors from 'cors';
+import nodemailer from 'nodemailer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createServer as createViteServer } from 'vite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
-
-// Express Middleware Setup
+// Middleware
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json({ limit: '10mb' }));
 
-const activeSessions = {};
-const transporters = new Map();
-
-/* ==========================================================================
-   ROOT ROUTE (Fixes Page Load & 500 Vercel Open Bug)
-   ========================================================================== */
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+// Health Check Endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-/* ==========================================================================
-   HELPER: CLOUDFLARE TURNSTILE VERIFICATION
-   ========================================================================== */
-async function verifyTurnstile(token, ip) {
-  if (!TURNSTILE_SECRET_KEY) return true;
-
+// Single or Bulk Email Dispatch API Endpoint
+app.post('/api/send-emails', async (req, res) => {
   try {
-    const response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        secret: TURNSTILE_SECRET_KEY,
-        response: token,
-        remoteip: ip
-      })
-    });
-    const data = await response.json();
-    return data.success;
-  } catch (error) {
-    console.error("Turnstile Verification Error:", error);
-    return false;
-  }
-}
+    const { accounts, recipients, subject, body, isHtml = false, delayMs = 1000 } = req.body;
 
-/* ==========================================================================
-   TRANSPORTER POOLING (Socket Connection Reuse)
-   ========================================================================== */
-function getTransporter(email, appPassword) {
-  const cleanEmail = email.toLowerCase().trim();
-  const cacheKey = `${cleanEmail}_${appPassword}`;
-
-  if (!transporters.has(cacheKey)) {
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: cleanEmail, pass: appPassword },
-      pool: true,
-      maxConnections: 2,
-      maxMessages: 50
-    });
-    transporters.set(cacheKey, transporter);
-  }
-  return transporters.get(cacheKey);
-}
-
-/* ==========================================================================
-   SPINTAX PARSER ({Hi|Hello|Hey})
-   ========================================================================== */
-function parseSpintax(text) {
-  if (!text) return "";
-  let spun = text;
-  const regex = /{([^{}]+)}/g;
-  let iterations = 0;
-  while (regex.test(spun) && iterations < 10) {
-    spun = spun.replace(regex, (_, choices) => {
-      const options = choices.split('|');
-      return options[Math.floor(Math.random() * options.length)];
-    });
-    iterations++;
-  }
-  return spun;
-}
-
-/* ==========================================================================
-   CLEAN PLAIN-TEXT FALLBACK (Dual Multipart MIME Support)
-   ========================================================================== */
-function convertHtmlToText(html) {
-  if (!html) return "";
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n\n')
-    .replace(/<\/div>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\n\s*\n/g, '\n\n')
-    .trim();
-}
-
-/* ==========================================================================
-   AUTHENTICATION ROUTES
-   ========================================================================== */
-app.post("/api/auth", (req, res) => {
-  const { password } = req.body;
-  if (!password) return res.status(400).json({ success: false, message: "Password is required" });
-  if (password === SITE_PASSWORD) return res.json({ success: true, message: "Access granted" });
-  return res.status(401).json({ success: false, message: "Incorrect password" });
-});
-
-app.post("/api/verify", async (req, res) => {
-  const { email, appPassword, cfToken } = req.body;
-
-  if (!email || !appPassword) {
-    return res.status(400).json({ success: false, message: "Email and App Password required" });
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      return res.status(400).json({ success: false, message: "Security check failed." });
-    }
-  }
-
-  try {
-    const transporter = getTransporter(email, appPassword);
-    await transporter.verify();
-    return res.json({ success: true, message: "SMTP verified successfully" });
-  } catch (error) {
-    return res.status(401).json({ success: false, message: "Authentication failed. Check App Password." });
-  }
-});
-
-/* ==========================================================================
-   SSE STREAM ROUTE (SLOW HUMAN-LIKE PACING: 4-8 SECONDS DELAY)
-   ========================================================================== */
-app.post("/api/send-stream", async (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
-
-  if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: "Missing required fields" })}\n\n`);
-    res.end();
-    return;
-  }
-
-  if (cfToken && TURNSTILE_SECRET_KEY) {
-    const isValidToken = await verifyTurnstile(cfToken, req.ip);
-    if (!isValidToken) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Turnstile verification failed" })}\n\n`);
-      res.end();
-      return;
-    }
-  }
-
-  const senderEmail = email.toLowerCase().trim();
-  const cleanSenderName = (senderName || "").replace(/"/g, "").trim();
-
-  activeSessions['global_stop'] = false;
-
-  for (let index = 0; index < recipients.length; index++) {
-    if (activeSessions['global_stop']) {
-      res.write(`data: ${JSON.stringify({ success: false, error: "Stopped by user" })}\n\n`);
-      break;
+    // Validation
+    if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
+      return res.status(400).json({
+        error: 'At least one sender account (email/user and appPassword/pass) is required.',
+      });
     }
 
-    const recipient = recipients[index] ? recipients[index].trim() : "";
-    if (!recipient) continue;
+    if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+      return res.status(400).json({ error: 'Recipients list is required and must be a non-empty array.' });
+    }
 
-    // Send HTTP keep-alive ping during slow delays to prevent connection drops
-    res.write(': keep-alive\n\n');
+    if (!subject || typeof subject !== 'string' || !subject.trim()) {
+      return res.status(400).json({ error: 'Subject is required.' });
+    }
 
-    try {
-      const transporter = getTransporter(email, appPassword);
-      const spunSubject = parseSpintax(subject);
-      const spunBody = parseSpintax(messageBody);
-      const isHtml = /<[a-z][\s\S]*>/i.test(spunBody);
+    if (!body || typeof body !== 'string' || !body.trim()) {
+      return res.status(400).json({ error: 'Email content/body is required.' });
+    }
 
-      // Clean, standard MIME structure without spammy custom headers
+    const results = [];
+    let accountIndex = 0;
+
+    // Iterate through recipients and send using rotating sender accounts
+    for (let i = 0; i < recipients.length; i++) {
+      const recipient = recipients[i];
+      const account = accounts[accountIndex % accounts.length];
+      accountIndex++;
+
+      const senderEmail = account.email || account.user;
+      const senderPassword = account.appPassword || account.pass || account.password;
+
+      if (!senderEmail || !senderPassword) {
+        results.push({
+          recipient,
+          sender: senderEmail || 'unknown',
+          status: 'failed',
+          error: 'Sender account is missing email or App Password.',
+        });
+        continue;
+      }
+
+      // Configure transport for current sender account
+      const transporter = nodemailer.createTransport({
+        service: account.service || 'gmail',
+        host: account.host || 'smtp.gmail.com',
+        port: account.port ? Number(account.port) : 465,
+        secure: account.secure !== undefined ? Boolean(account.secure) : true,
+        auth: {
+          user: senderEmail,
+          pass: senderPassword,
+        },
+        connectionTimeout: 10000,
+      });
+
       const mailOptions = {
-        from: cleanSenderName ? `"${cleanSenderName}" <${senderEmail}>` : senderEmail,
+        from: account.senderName ? `"${account.senderName}" <${senderEmail}>` : senderEmail,
         to: recipient,
-        subject: spunSubject
+        subject: subject,
+        [isHtml ? 'html' : 'text']: body,
       };
 
-      if (isHtml) {
-        mailOptions.html = spunBody;
-        mailOptions.text = convertHtmlToText(spunBody);
-      } else {
-        mailOptions.text = spunBody;
+      try {
+        const info = await transporter.sendMail(mailOptions);
+        results.push({
+          recipient,
+          sender: senderEmail,
+          status: 'success',
+          messageId: info.messageId,
+        });
+      } catch (err) {
+        results.push({
+          recipient,
+          sender: senderEmail,
+          status: 'failed',
+          error: err instanceof Error ? err.message : 'Failed to send email',
+        });
       }
 
-      await transporter.sendMail(mailOptions);
-      res.write(`data: ${JSON.stringify({ success: true, recipient })}\n\n`);
-
-    } catch (error) {
-      console.error(`Error sending to ${recipient}:`, error.message);
-      res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
-    }
-
-    // ORGANIC PACING: Random delay between 2.0s and 4.0s to simulate natural sending
-    if (index < recipients.length - 1) {
-      const randomDelay = Math.floor(600 + Math.random() * 600);
-      
-      // Ping client every 2 seconds during the long wait to keep socket alive
-      const delayIntervals = Math.floor(randomDelay / 2000);
-      for (let i = 0; i < delayIntervals; i++) {
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        res.write(': keep-alive\n\n');
+      // Add controlled throttling delay between emails
+      if (i < recipients.length - 1 && delayMs > 0) {
+        const safeDelay = Math.min(Math.max(Number(delayMs), 100), 10000);
+        await new Promise((resolve) => setTimeout(resolve, safeDelay));
       }
     }
+
+    const successCount = results.filter((r) => r.status === 'success').length;
+    const failedCount = results.filter((r) => r.status === 'failed').length;
+
+    return res.json({
+      message: 'Batch processing completed',
+      total: recipients.length,
+      successCount,
+      failedCount,
+      results,
+    });
+  } catch (error) {
+    console.error('Error during email dispatch:', error);
+    return res.status(500).json({
+      error: 'Server error processing email request: ' + (error instanceof Error ? error.message : String(error)),
+    });
+  }
+});
+
+// Start Express Server with Vite Dev / Prod Static Handling
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
 
-  res.write("data: [DONE]\n\n");
-  res.end();
-});
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+  });
+}
 
-/* ==========================================================================
-   STOP ROUTE
-   ========================================================================== */
-app.post("/api/stop", (req, res) => {
-  activeSessions['global_stop'] = true;
-  res.json({ success: true, message: "Stop process registered" });
-});
-
-/* ==========================================================================
-   VERCEL HANDLER EXPORT
-   ========================================================================== */
-export default app;
+startServer();
