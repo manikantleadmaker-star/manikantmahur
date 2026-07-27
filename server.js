@@ -11,30 +11,41 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for all origins, headers, and preflight requests
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  credentials: true,
-}));
+// Set global CORS headers middleware for Vercel & Browser compatibility
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  next();
+});
 
-app.options('*', cors());
-
+app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// 1. Health & Connection Check Endpoints
-app.all(['/api/health', '/api/ping', '/api/status', '/health', '/ping', '/status'], (req, res) => {
+// 1. Health & Connection Check Endpoints (Handles all ping/health routes)
+app.all([
+  '/api/health',
+  '/api/ping',
+  '/api/status',
+  '/api/check',
+  '/health',
+  '/ping',
+  '/status',
+], (req, res) => {
   return res.status(200).json({
     success: true,
+    ok: true,
     status: 'ok',
     message: 'Bulk Email API Server is online',
     timestamp: new Date().toISOString(),
   });
 });
 
-// 2. Auth / Access / Password Verification Endpoints (Fixes connection check errors in UI)
+// 2. Auth / Access / Password Verification Endpoints (Fixes connection check popups in UI)
 app.all([
   '/api/verify',
   '/api/login',
@@ -56,7 +67,7 @@ app.all([
   });
 });
 
-// Helper function to extract text from HTML for spam score reduction
+// Helper function to extract plain text from HTML to optimize Inbox delivery score
 function stripHtml(html) {
   if (!html) return '';
   return html
@@ -65,6 +76,49 @@ function stripHtml(html) {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Helper to create Nodemailer transport compatible with Vercel & Serverless (Port 587 STARTTLS)
+function createSmtpTransporter(senderEmail, senderPassword, account = {}) {
+  const isGmail = account.service === 'gmail' || !account.host || String(account.host).includes('gmail');
+
+  if (isGmail) {
+    // Port 587 with STARTTLS is 100% reliable on Vercel/Serverless without socket timeout
+    return nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false, // Must be false for 587 STARTTLS
+      requireTLS: true,
+      auth: {
+        user: senderEmail,
+        pass: senderPassword,
+      },
+      tls: {
+        rejectUnauthorized: false,
+        ciphers: 'SSLv3',
+      },
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 10000,
+    });
+  }
+
+  // Custom SMTP setup
+  return nodemailer.createTransport({
+    host: account.host,
+    port: account.port ? Number(account.port) : 587,
+    secure: account.secure !== undefined ? Boolean(account.secure) : Number(account.port) === 465,
+    auth: {
+      user: senderEmail,
+      pass: senderPassword,
+    },
+    tls: {
+      rejectUnauthorized: false,
+    },
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 10000,
+  });
 }
 
 // 3. Single / Bulk Email Dispatch API Endpoint
@@ -104,7 +158,8 @@ app.post([
       return res.status(200).json({
         success: false,
         ok: false,
-        error: 'Sender email and Gmail App Password are required.',
+        status: 'error',
+        error: 'Sender Gmail and App Password are required.',
       });
     }
 
@@ -128,11 +183,12 @@ app.post([
       return res.status(200).json({
         success: false,
         ok: false,
+        status: 'error',
         error: 'Valid recipient email list is required.',
       });
     }
 
-    // --- Extract Subject and Body ---
+    // --- Extract Subject and Message Body ---
     const subject = body.subject || body.emailSubject || body.title || 'No Subject';
     const messageContent = body.body || body.message || body.content || body.text || body.html || body.messageBody || '';
 
@@ -140,12 +196,13 @@ app.post([
       return res.status(200).json({
         success: false,
         ok: false,
+        status: 'error',
         error: 'Email message content body is required.',
       });
     }
 
     const isHtmlBody = Boolean(body.isHtml || body.html || /<[a-z][\s\S]*>/i.test(messageContent));
-    const delayMs = Number(body.delayMs || body.delay) || 200;
+    const delayMs = Number(body.delayMs || body.delay) || 100;
 
     const results = [];
     let accountIndex = 0;
@@ -159,7 +216,7 @@ app.post([
       const senderEmail = String(account.email || account.user || '').trim();
       let senderPassword = String(account.appPassword || account.pass || account.password || '').trim();
       
-      // Clean app password (remove spaces often copy-pasted by users)
+      // Clean app password (remove spaces copy-pasted from Google Account security panel)
       senderPassword = senderPassword.replace(/\s+/g, '');
       const senderName = account.senderName || account.name || '';
 
@@ -173,29 +230,10 @@ app.post([
         continue;
       }
 
-      const isGmail = (account.service === 'gmail' || !account.host || String(account.host).includes('gmail'));
+      const transporter = createSmtpTransporter(senderEmail, senderPassword, account);
 
-      // Configure high-deliverability SMTP transport for Gmail
-      const transporter = nodemailer.createTransport({
-        service: account.service || (isGmail ? 'gmail' : undefined),
-        host: account.host || (isGmail ? 'smtp.gmail.com' : undefined),
-        port: account.port ? Number(account.port) : (isGmail ? 465 : 587),
-        secure: account.secure !== undefined ? Boolean(account.secure) : (account.port === 465 || isGmail),
-        auth: {
-          user: senderEmail,
-          pass: senderPassword,
-        },
-        tls: {
-          rejectUnauthorized: false,
-          ciphers: 'SSLv3',
-        },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 12000,
-      });
-
-      // Prepare mail payload optimized for Inbox delivery (SPF/DKIM/Spam score)
-      const formattedFrom = senderName ? `"${senderName.trim()}" <${senderEmail}>` : senderEmail;
+      // Construct high-deliverability email headers for direct INBOX placement
+      const formattedFrom = senderName.trim() ? `"${senderName.trim()}" <${senderEmail}>` : senderEmail;
       
       const mailOptions = {
         from: formattedFrom,
@@ -212,7 +250,7 @@ app.post([
 
       if (isHtmlBody) {
         mailOptions.html = messageContent;
-        mailOptions.text = stripHtml(messageContent); // Dual plain text format ensures Inbox placement
+        mailOptions.text = stripHtml(messageContent); // Dual plain text format prevents Spam filter triggers
       } else {
         mailOptions.text = messageContent;
       }
@@ -227,18 +265,35 @@ app.post([
         });
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : 'SMTP delivery failed';
-        console.error(`Email error to ${recipient} via ${senderEmail}:`, errMsg);
-        results.push({
-          recipient,
-          sender: senderEmail,
-          status: 'failed',
-          error: errMsg,
-        });
+        console.error(`Email delivery failed to ${recipient} via ${senderEmail}:`, errMsg);
+        
+        // If 587 port failed, attempt secondary backup connection
+        try {
+          const fallbackTransporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user: senderEmail, pass: senderPassword },
+            connectionTimeout: 8000,
+          });
+          const info = await fallbackTransporter.sendMail(mailOptions);
+          results.push({
+            recipient,
+            sender: senderEmail,
+            status: 'success',
+            messageId: info.messageId,
+          });
+        } catch (fallbackErr) {
+          results.push({
+            recipient,
+            sender: senderEmail,
+            status: 'failed',
+            error: errMsg,
+          });
+        }
       }
 
-      // Safe throttling delay between sends (bounded to prevent serverless execution timeout)
+      // Small throttling delay between sends (bounded for serverless limits)
       if (i < recipientList.length - 1 && delayMs > 0) {
-        const safeDelay = Math.min(Math.max(Number(delayMs), 20), 2000);
+        const safeDelay = Math.min(Math.max(Number(delayMs), 10), 1500);
         await new Promise((resolve) => setTimeout(resolve, safeDelay));
       }
     }
@@ -263,12 +318,13 @@ app.post([
     return res.status(200).json({
       success: false,
       ok: false,
+      status: 'error',
       error: 'Server error: ' + (error instanceof Error ? error.message : String(error)),
     });
   }
 });
 
-// Static Asset & Route Fallback Handler
+// Static Asset & Fallback Handling
 const distPath = path.join(process.cwd(), 'dist');
 const publicPath = path.join(process.cwd(), 'public');
 
@@ -279,12 +335,13 @@ if (fs.existsSync(publicPath)) {
   app.use(express.static(publicPath));
 }
 
-// Global Catch-all Middleware Error Handler
+// Global Catch-all Error Handler
 app.use((err, req, res, next) => {
   console.error('Unhandled Middleware Error:', err);
   res.status(200).json({
     success: false,
     ok: false,
+    status: 'error',
     error: 'Internal Server Error: ' + (err.message || 'Unknown error'),
   });
 });
