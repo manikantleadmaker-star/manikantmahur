@@ -2,8 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import nodemailer from 'nodemailer';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,7 +23,7 @@ app.get('/api/health', (req, res) => {
 // Single or Bulk Email Dispatch API Endpoint
 app.post('/api/send-emails', async (req, res) => {
   try {
-    const { accounts, recipients, subject, body, isHtml = false, delayMs = 1000 } = req.body;
+    const { accounts, recipients, subject, body, isHtml = false, delayMs = 300 } = req.body;
 
     // Validation
     if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
@@ -66,17 +66,21 @@ app.post('/api/send-emails', async (req, res) => {
         continue;
       }
 
-      // Configure transport for current sender account
+      // Configure transport for Gmail / SMTP with optimized deliverability and timeouts
+      const isGmail = (account.service === 'gmail' || !account.host || account.host.includes('gmail'));
+      
       const transporter = nodemailer.createTransport({
-        service: account.service || 'gmail',
-        host: account.host || 'smtp.gmail.com',
-        port: account.port ? Number(account.port) : 465,
-        secure: account.secure !== undefined ? Boolean(account.secure) : true,
+        service: account.service || (isGmail ? 'gmail' : undefined),
+        host: account.host || (isGmail ? 'smtp.gmail.com' : undefined),
+        port: account.port ? Number(account.port) : (isGmail ? 465 : 587),
+        secure: account.secure !== undefined ? Boolean(account.secure) : (account.port === 465 || isGmail),
         auth: {
           user: senderEmail,
           pass: senderPassword,
         },
         connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 15000,
       });
 
       const mailOptions = {
@@ -84,6 +88,10 @@ app.post('/api/send-emails', async (req, res) => {
         to: recipient,
         subject: subject,
         [isHtml ? 'html' : 'text']: body,
+        replyTo: senderEmail,
+        headers: {
+          'X-Mailer': 'Nodemailer Multi-Sender',
+        },
       };
 
       try {
@@ -103,9 +111,9 @@ app.post('/api/send-emails', async (req, res) => {
         });
       }
 
-      // Add controlled throttling delay between emails
+      // Add controlled throttling delay between emails (bounded to prevent Vercel timeout)
       if (i < recipients.length - 1 && delayMs > 0) {
-        const safeDelay = Math.min(Math.max(Number(delayMs), 100), 10000);
+        const safeDelay = Math.min(Math.max(Number(delayMs), 50), 3000);
         await new Promise((resolve) => setTimeout(resolve, safeDelay));
       }
     }
@@ -128,25 +136,62 @@ app.post('/api/send-emails', async (req, res) => {
   }
 });
 
-// Start Express Server with Vite Dev / Prod Static Handling
-async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+// Serve Static Files and Root Handler (Essential for Vercel & Standard Express)
+const distPath = path.join(process.cwd(), 'dist');
+const publicPath = path.join(process.cwd(), 'public');
+
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
+if (fs.existsSync(publicPath)) {
+  app.use(express.static(publicPath));
+}
+
+// Fallback Route Handler for GET *
+app.get('*', (req, res) => {
+  const distHtml = path.join(distPath, 'index.html');
+  const publicHtml = path.join(publicPath, 'index.html');
+  const rootHtml = path.join(process.cwd(), 'index.html');
+
+  if (fs.existsSync(distHtml)) {
+    return res.sendFile(distHtml);
+  } else if (fs.existsSync(publicHtml)) {
+    return res.sendFile(publicHtml);
+  } else if (fs.existsSync(rootHtml)) {
+    return res.sendFile(rootHtml);
   }
 
+  return res.status(200).send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Bulk Email Sender API</title>
+        <style>
+          body { font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; display: flex; justify-content: center; align-items: center; min-height: 80vh; }
+          .card { background: #1e293b; border: 1px solid #334155; padding: 2rem; border-radius: 12px; max-width: 600px; width: 100%; text-align: center; }
+          h1 { color: #38bdf8; margin-top: 0; }
+          code { background: #0f172a; color: #a5f3fc; padding: 4px 8px; border-radius: 4px; font-size: 0.9em; }
+          .status { color: #4ade80; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>Bulk Email Sender API</h1>
+          <p>Status: <span class="status">Online & Ready</span></p>
+          <p>Endpoints:</p>
+          <p><code>GET /api/health</code> - Check server health</p>
+          <p><code>POST /api/send-emails</code> - Send bulk emails via Gmail App Passwords</p>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+// If running in traditional Node server environment (not Vercel serverless)
+if (!process.env.VERCEL) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+export default app;
