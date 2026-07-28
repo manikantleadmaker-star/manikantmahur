@@ -16,7 +16,7 @@ const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 
-// Global CORS & Preflight Response Headers
+// Universal CORS & Preflight Middleware
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -31,12 +31,12 @@ app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Transporter Connection Pool & Session Control
+// Transporter Cache & Session Manager
 const activeSessions = {};
 const transporters = new Map();
 
 /* ==========================================================================
-   TRANSPORTER POOLING (High-Deliverability SMTP Connection Pool)
+   TRANSPORTER POOLING (Reusable SMTP Connection Pool)
    ========================================================================== */
 function getTransporter(email, appPassword, options = {}) {
   const cleanEmail = String(email || '').toLowerCase().trim();
@@ -106,13 +106,12 @@ function parseSpintax(text) {
 }
 
 /* ==========================================================================
-   CLEAN & SANITIZE EMAIL BODY (Removes Spam Triggers, Extra Links & Scripts)
+   CLEAN EMAIL BODY (Removes Spam Triggers, Scripts, & Hidden Links)
    ========================================================================== */
 function cleanEmailBody(content) {
   if (!content) return '';
   let cleaned = String(content);
 
-  // Remove dangerous scripts, iframes, objects, embedded tracking pixels
   cleaned = cleaned
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<iframe[\s\S]*?<\/iframe>/gi, '')
@@ -125,7 +124,7 @@ function cleanEmailBody(content) {
 }
 
 /* ==========================================================================
-   PLAIN TEXT CONVERTER (Balanced Dual Multipart MIME for Direct INBOX Placement)
+   PLAIN TEXT CONVERTER (Dual Multipart MIME for Direct INBOX Placement)
    ========================================================================== */
 function convertHtmlToText(html) {
   if (!html) return '';
@@ -165,24 +164,24 @@ async function verifyTurnstile(token, ip) {
     return Boolean(data.success);
   } catch (error) {
     console.error('Turnstile Verification Warning:', error);
-    return true; // Fallback gracefully if verification service times out
+    return true;
   }
 }
 
 /* ==========================================================================
-   HEALTH & CONNECTION CHECK ROUTES
+   HEALTH CHECK ENDPOINT
    ========================================================================== */
 app.all(['/api/health', '/api/ping', '/api/status', '/health', '/ping'], (req, res) => {
   return res.status(200).json({
     success: true,
     status: 'ok',
-    message: 'Bulk Email API Online & Operational',
+    message: 'Bulk Email Service Online',
     timestamp: new Date().toISOString(),
   });
 });
 
 /* ==========================================================================
-   AUTHENTICATION & SMTP VERIFICATION ENDPOINTS
+   AUTHENTICATION & SMTP VERIFICATION
    ========================================================================== */
 app.post(['/api/auth', '/api/verify-password', '/api/login'], (req, res) => {
   const { password } = req.body || {};
@@ -215,13 +214,13 @@ app.post(['/api/verify', '/api/verify-smtp'], async (req, res) => {
     return res.json({ success: true, message: 'SMTP verified successfully' });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    console.error('SMTP Verification Error for:', email, errMsg);
-    return res.status(401).json({ success: false, message: 'Authentication failed. Please check your App Password.' });
+    console.error('SMTP Verification Error:', email, errMsg);
+    return res.status(401).json({ success: false, message: 'Authentication failed. Check App Password.' });
   }
 });
 
 /* ==========================================================================
-   REAL-TIME SSE EMAIL DISPATCH (Strictly Optimized for INBOX Placement)
+   REAL-TIME SSE EMAIL DISPATCH (Optimized for Direct Primary Inbox)
    ========================================================================== */
 app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -231,20 +230,18 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
 
   const { email, appPassword, senderName, subject, messageBody, recipients, cfToken, accounts } = req.body || {};
 
-  // Extract Accounts
   let senderAccounts = Array.isArray(accounts) && accounts.length > 0 ? accounts : [];
   if (senderAccounts.length === 0 && email && appPassword) {
     senderAccounts.push({ email, appPassword, senderName });
   }
 
-  // Extract Target Recipients
   let targetRecipients = Array.isArray(recipients) ? recipients : [];
   if (targetRecipients.length === 0 && typeof recipients === 'string') {
     targetRecipients = recipients.split(/[\n,;]+/).map((r) => r.trim()).filter(Boolean);
   }
 
   if (senderAccounts.length === 0 || targetRecipients.length === 0) {
-    res.write(`data: ${JSON.stringify({ success: false, error: 'Sender email, App Password, and recipient list are required.' })}\n\n`);
+    res.write(`data: ${JSON.stringify({ success: false, error: 'Missing required credentials or recipients list.' })}\n\n`);
     res.end();
     return;
   }
@@ -277,22 +274,17 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
     const accPass = String(currentAccount.appPassword || currentAccount.pass || appPassword || '').trim().replace(/\s+/g, '');
     const accSenderName = String(currentAccount.senderName || currentAccount.name || senderName || '').trim().replace(/["<>]/g, '');
 
-    // Send SSE keep-alive ping frame to maintain live connection
     res.write(': keep-alive\n\n');
 
     try {
       const transporter = getTransporter(accEmail, accPass, currentAccount);
       
-      // Dynamic Spintax Variations
       const rawSubject = parseSpintax(subject || 'No Subject');
       const rawBody = parseSpintax(messageBody || '');
       const cleanedBody = cleanEmailBody(rawBody);
       const isHtml = /<[a-z][\s\S]*>/i.test(cleanedBody);
 
-      // Clean Standard RFC Format (Sender Name + Authenticated Email)
       const formattedFrom = accSenderName ? `"${accSenderName}" <${accEmail}>` : accEmail;
-      
-      // Generate clean RFC-compliant Message-ID to pass DKIM/DMARC filters
       const domain = accEmail.includes('@') ? accEmail.split('@')[1] : 'gmail.com';
       const customMessageId = `<${crypto.randomBytes(12).toString('hex')}@${domain}>`;
 
@@ -310,7 +302,7 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
 
       if (isHtml) {
         mailOptions.html = cleanedBody;
-        mailOptions.text = convertHtmlToText(cleanedBody); // Balanced Plain Text ensures high Inbox score
+        mailOptions.text = convertHtmlToText(cleanedBody);
       } else {
         mailOptions.text = cleanedBody;
       }
@@ -321,7 +313,7 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error(`Error delivering to ${recipient} via ${accEmail}:`, errMsg);
 
-      // Fallback attempt via STARTTLS Port 587 if primary pool failed
+      // STARTTLS Fallback
       try {
         const fallbackTransporter = nodemailer.createTransport({
           host: 'smtp.gmail.com',
@@ -360,7 +352,7 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
       }
     }
 
-    // Natural Human Pacing (1.5s - 3.0s Jitter Delay to prevent Gmail Bulk Spam Rate Limits)
+    // Natural Pacing Delay (1.5s - 3.0s Jitter Delay)
     if (index < targetRecipients.length - 1) {
       const randomDelay = Math.floor(1500 + Math.random() * 1500);
       await new Promise((resolve) => setTimeout(resolve, randomDelay));
@@ -373,7 +365,7 @@ app.post(['/api/send-stream', '/api/stream'], async (req, res) => {
 });
 
 /* ==========================================================================
-   STANDARD JSON BULK EMAIL DISPATCH ENDPOINT
+   STANDARD JSON BULK SEND ENDPOINT
    ========================================================================== */
 app.post(['/api/send-emails', '/api/send-email', '/api/send', '/send-emails', '/send-email'], async (req, res) => {
   try {
@@ -412,7 +404,7 @@ app.post(['/api/send-emails', '/api/send-email', '/api/send', '/send-emails', '/
       const accName = String(acc.senderName || acc.name || senderName || '').trim().replace(/["<>]/g, '');
 
       if (!accEmail || !accPass) {
-        results.push({ recipient, status: 'failed', error: 'Missing email or App Password.' });
+        results.push({ recipient, status: 'failed', error: 'Missing credentials.' });
         continue;
       }
 
@@ -462,7 +454,7 @@ app.post(['/api/send-emails', '/api/send-email', '/api/send', '/send-emails', '/
 });
 
 /* ==========================================================================
-   STOP DISPATCH PROCESS ROUTE
+   STOP BATCH ROUTE
    ========================================================================== */
 app.post(['/api/stop', '/stop'], (req, res) => {
   activeSessions['global_stop'] = true;
@@ -511,7 +503,7 @@ app.get('*', (req, res) => {
       <body>
         <div class="card">
           <h1>Bulk Email Sender API</h1>
-          <p>Status: <span class="status">Online & Operational</span></p>
+          <p>Status: <span class="status">Online & Fully Operational</span></p>
           <p>Endpoints Ready:</p>
           <p><code>POST /api/auth</code> - Password Verification (Default: Y##)</p>
           <p><code>POST /api/verify</code> - SMTP & App Password Check</p>
@@ -524,7 +516,7 @@ app.get('*', (req, res) => {
 });
 
 /* ==========================================================================
-   STANDALONE SERVER / VERCEL HANDLER EXPORT
+   STANDALONE SERVER LISTENER / VERCEL HANDLER EXPORT
    ========================================================================== */
 if (!process.env.VERCEL) {
   app.listen(PORT, '0.0.0.0', () => {
