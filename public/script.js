@@ -1,8 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
 
-    // ==========================================================================
-    // 1. AUTHENTICATION & UI GATE HANDLERS
-    // ==========================================================================
+    // ==================== AUTHENTICATION & UI ====================
     const passwordGate = document.getElementById('password-gate');
     const mainApp = document.getElementById('main-app');
     const gateForm = document.getElementById('gate-form');
@@ -12,7 +10,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const toggleGatePassword = document.getElementById('toggle-gate-password');
     const logoutBtn = document.getElementById('logout-btn');
 
-    // Check existing session
     if (sessionStorage.getItem('authenticated') === 'true') {
         passwordGate?.classList.add('hidden');
         mainApp?.classList.remove('hidden');
@@ -21,18 +18,14 @@ document.addEventListener('DOMContentLoaded', () => {
         mainApp?.classList.add('hidden');
     }
 
-    // Toggle password visibility on Gate
     if (toggleGatePassword && gatePassword) {
         toggleGatePassword.addEventListener('click', () => {
             const type = gatePassword.getAttribute('type') === 'password' ? 'text' : 'password';
             gatePassword.setAttribute('type', type);
-            toggleGatePassword.innerHTML = type === 'password' 
-                ? '<i class="fa-regular fa-eye"></i>' 
-                : '<i class="fa-regular fa-eye-slash"></i>';
+            toggleGatePassword.innerHTML = type === 'password' ? '<i class="fa-regular fa-eye"></i>' : '<i class="fa-regular fa-eye-slash"></i>';
         });
     }
 
-    // Password Gate Form Submission
     if (gateForm) {
         gateForm.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -62,7 +55,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     gatePassword.focus();
                 }
             } catch (err) {
-                alert('Connection error. Please try again.');
+                alert('Connection error. Try again.');
             } finally {
                 gateSubmitBtn.disabled = false;
                 gateSubmitBtn.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket"></i> Enter';
@@ -70,7 +63,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Double-click Logout Handler
     if (logoutBtn) {
         logoutBtn.addEventListener('dblclick', () => {
             sessionStorage.removeItem('authenticated');
@@ -78,9 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ==========================================================================
-    // 2. CONSOLE FORM & LIVE SSE BATCH MONITOR
-    // ==========================================================================
+    // ==================== MAIN CONSOLE & LIVE MONITOR ====================
     const dashboardEmail = document.getElementById('dashboard-email');
     const dashboardPassword = document.getElementById('dashboard-password');
     const togglePasswordBtn = document.getElementById('toggle-password');
@@ -108,18 +98,14 @@ document.addEventListener('DOMContentLoaded', () => {
     let isSending = false;
     let stopRequested = false;
 
-    // Toggle Dashboard App Password Visibility
     if (togglePasswordBtn && dashboardPassword) {
         togglePasswordBtn.addEventListener('click', () => {
             const type = dashboardPassword.getAttribute('type') === 'password' ? 'text' : 'password';
             dashboardPassword.setAttribute('type', type);
-            togglePasswordBtn.innerHTML = type === 'password' 
-                ? '<i class="fa-regular fa-eye"></i>' 
-                : '<i class="fa-regular fa-eye-slash"></i>';
+            togglePasswordBtn.innerHTML = type === 'password' ? '<i class="fa-regular fa-eye"></i>' : '<i class="fa-regular fa-eye-slash"></i>';
         });
     }
 
-    // Extract & Validate Emails from Textarea
     if (recipientsInput) {
         recipientsInput.addEventListener('input', () => {
             const text = recipientsInput.value;
@@ -132,7 +118,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const emailRegex = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
             const matches = text.match(emailRegex) || [];
 
-            // Deduplicate and trim email list
             extractedEmails = [...new Set(matches.map(e => e.toLowerCase().trim()))];
 
             if (detectedCount) detectedCount.textContent = `${extractedEmails.length} found`;
@@ -142,7 +127,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // UI Helper Functions
     function startSendingUI(total) {
         isSending = true;
         stopRequested = false;
@@ -153,7 +137,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (progressBar) progressBar.style.width = '0%';
 
         if (statusIcon) statusIcon.className = 'fa-solid fa-circle-notch fa-spin text-primary';
-        if (statusText) statusText.textContent = 'Sending emails in batches of 8...';
+        if (statusText) statusText.textContent = 'Sending emails 1-by-1...';
 
         sendBtn?.classList.add('hidden');
         stopBtn?.classList.remove('hidden');
@@ -184,13 +168,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Main Dispatch Event
     if (sendBtn) {
         sendBtn.addEventListener('click', async () => {
             if (isSending) return;
 
             const emailVal = dashboardEmail.value.trim();
-            const appPasswordVal = dashboardPassword.value.replace(/\s+/g, '').trim();
+            const appPasswordVal = dashboardPassword.value.trim();
             const senderNameVal = senderName.value.trim();
             const subjectVal = subject.value.trim();
             const messageBodyVal = messageBody.value.trim();
@@ -200,7 +183,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             if (extractedEmails.length === 0) {
                 emailValidationError?.classList.remove('hidden');
-                return alert('Please enter valid recipient emails.');
+                return alert('Please enter recipient emails.');
             }
 
             const recipientsToSend = [...extractedEmails];
@@ -210,7 +193,6 @@ document.addEventListener('DOMContentLoaded', () => {
             sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
 
             try {
-                // Step 1: Verify SMTP Auth
                 const verifyRes = await fetch('/api/verify', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -224,13 +206,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
 
-                // Step 2: Initialize UI
                 startSendingUI(recipientsToSend.length);
 
                 let sentCount = 0;
                 let failedCount = 0;
 
-                // Step 3: Stream SSE Batch Process
                 const response = await fetch('/api/send-stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -240,12 +220,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         senderName: senderNameVal,
                         subject: subjectVal,
                         messageBody: messageBodyVal,
-                        recipients: recipientsToSend,
-                        cfToken: turnstileResponse
+                        recipients: recipientsToSend
                     })
                 });
 
-                if (!response.ok) throw new Error('Streaming connection failed.');
+                if (!response.ok) throw new Error('Streaming failed.');
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -259,12 +238,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\n\n');
-                    buffer = lines.pop(); // Retain incomplete chunk in buffer
+                    buffer = lines.pop();
 
                     for (const line of lines) {
-                        const trimmedLine = line.trim();
-                        if (trimmedLine.startsWith('data: ')) {
-                            const dataStr = trimmedLine.replace('data: ', '').trim();
+                        if (line.startsWith('data: ')) {
+                            const dataStr = line.replace('data: ', '').trim();
                             if (dataStr === '[DONE]') break;
 
                             try {
@@ -272,12 +250,12 @@ document.addEventListener('DOMContentLoaded', () => {
                                 if (event.success) {
                                     sentCount++;
                                     updateProgressUI(sentCount, failedCount, recipientsToSend.length, `Sent: ${event.recipient}`);
-                                } else if (event.recipient) {
+                                } else {
                                     failedCount++;
                                     updateProgressUI(sentCount, failedCount, recipientsToSend.length, `Failed: ${event.recipient}`);
                                 }
                             } catch (e) {
-                                // Ignore keep-alive comments or non-JSON chunks
+                                console.error('Parse error:', e);
                             }
                         }
                     }
@@ -286,16 +264,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 isSending = false;
                 if (stopRequested) {
                     if (statusIcon) statusIcon.className = 'fa-solid fa-circle-stop text-danger';
-                    if (statusText) statusText.textContent = 'Process stopped by user.';
+                    if (statusText) statusText.textContent = 'Process stopped.';
                 } else {
                     if (statusIcon) statusIcon.className = 'fa-solid fa-circle-check text-success';
                     if (statusText) statusText.textContent = 'Completed!';
-                    alert(`Process Finished!\nSent: ${sentCount}\nFailed: ${failedCount}`);
+                    alert(`Completed! Sent: ${sentCount}, Failed: ${failedCount}`);
                 }
 
             } catch (err) {
                 console.error(err);
-                alert('Connection error occurred during transmission.');
+                alert('Connection error occurred.');
             } finally {
                 isSending = false;
                 finishSendingUI();
@@ -303,7 +281,6 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Stop Sending Execution
     if (stopBtn) {
         stopBtn.addEventListener('click', async () => {
             stopRequested = true;
@@ -314,7 +291,7 @@ document.addEventListener('DOMContentLoaded', () => {
             try {
                 await fetch('/api/stop', { method: 'POST' });
             } catch (e) {
-                console.error("Stop error:", e);
+                console.error("Stop error", e);
             }
         });
     }
