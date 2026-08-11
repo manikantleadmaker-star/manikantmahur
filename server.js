@@ -161,9 +161,9 @@ app.post("/api/send-stream", async (req, res) => {
       res.write(`data: ${JSON.stringify({ success: false, recipient, error: error.message })}\n\n`);
     }
 
-    // Safe 1.5-Second Delay to avoid socket crashing
+    // Delay: 100ms (0.1 Second) per email
     if (index < recipients.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 400));
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
