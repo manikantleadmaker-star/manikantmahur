@@ -240,8 +240,6 @@ app.post('/api/send-stream', async (req, res) => {
           replyTo: cleanEmail,
           subject: personalizedSubject,
           headers: {
-            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=Unsubscribe>`,
-            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
           }
         };
 
