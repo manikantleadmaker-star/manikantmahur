@@ -21,7 +21,7 @@ app.use(express.json({ limit: "50mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 /* ==========================================================================
-   1. HIGH-PERFORMANCE GMAIL TRANSPORTER POOL
+   1. HIGH-DELIVERABILITY GMAIL TRANSPORTER POOL
    ========================================================================== */
 function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -32,17 +32,17 @@ function getPort587Transporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // Uses STARTTLS (RFC Compliant)
+      secure: false, // Uses STARTTLS
       requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 5, // Enhanced socket pool for high speed
-      maxMessages: 500,
-      socketTimeout: 20000,
-      connectionTimeout: 20000
+      maxConnections: 2, // 5 से घटाकर 2 किया गया (Gmail Rate-Limit Safeguard)
+      maxMessages: 100,
+      socketTimeout: 30000,
+      connectionTimeout: 30000
     });
 
     poolMap.set(key, transporter);
@@ -55,7 +55,7 @@ function getPort587Transporter(email, appPassword) {
    2. RECIPIENT PARSER, SPINTAX & REF-CODE GENERATOR
    ========================================================================== */
 function generateReferenceCode() {
-  return `[Ref: ${crypto.randomBytes(3).toString('hex')}]`;
+  return `Ref: #${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
 }
 
 function parseRecipientData(input) {
@@ -127,7 +127,7 @@ function personalizeContent(template, recipient) {
   if (!template) return "";
   let content = parseSpintax(template);
 
-  const displayName = recipient.name || recipient.firstName || "there";
+  const displayName = recipient.name || recipient.firstName || "Friend";
   const displayFirstName = recipient.firstName || displayName;
 
   content = content.replace(/{Name}/gi, displayName);
@@ -187,7 +187,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   4. STREAMING ENGINE (HIGH SPEED + BATCH PARALLEL + HIGH INBOX LANDING)
+   4. OPTIMIZED STREAMING ENGINE (HIGH INBOX LANDING RATE)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -213,8 +213,8 @@ app.post('/api/send-stream', async (req, res) => {
 
   const transporter = getPort587Transporter(email, appPassword);
   
-  // Parallel Batch Configuration for High Speed
-  const BATCH_SIZE = 4;
+  // Safe Batch size for Gmail Anti-Spam protection
+  const BATCH_SIZE = 2;
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -238,25 +238,39 @@ app.post('/api/send-stream', async (req, res) => {
           ? personalizedBody
           : personalizedBody.replace(/\n/g, '<br>');
 
-        const formattedHtml = `<div dir="ltr" style="font-family: Arial, sans-serif; font-size: 14px; color: #111111; line-height: 1.5;">${formattedBodyText}<br><br><span style="font-size: 11px; color: #888888;">${refCode}</span></div>`;
+        // Professional Standard HTML Envelope (Avoids Spam Filters)
+        const formattedHtml = `
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            </head>
+            <body style="margin:0; padding:10px; font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; background-color: #ffffff;">
+              <div style="max-width: 600px; margin: 0 auto;">
+                ${formattedBodyText}
+                <br><br>
+                <div style="font-size: 11px; color: #999999; border-top: 1px solid #eeeeee; padding-top: 10px; margin-top: 20px;">
+                  ${refCode}
+                </div>
+              </div>
+            </body>
+          </html>
+        `;
+
         const plainTextFormatted = createPlainTextFromHtml(personalizedBody) + `\n\n${refCode}`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
           to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
-          envelope: {
-            from: cleanEmail,
-            to: recipient.email
-          },
           replyTo: cleanEmail,
           date: new Date(),
           subject: personalizedSubject,
           text: plainTextFormatted,
           html: formattedHtml,
-          textEncoding: 'quoted-printable',
-          encoding: 'utf-8',
+          // Custom headers optimized for inboxing
           headers: {
-            'X-Mailer': 'Gmail Core Engine',
+            'X-Entity-Ref-ID': crypto.randomBytes(8).toString('hex'),
             'List-Unsubscribe': `<mailto:${cleanEmail}?subject=Unsubscribe>`
           }
         };
@@ -277,10 +291,10 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // High Speed Delay (200ms - 400ms) for Optimal Delivery & Rate Protection
+    // Delay Adjustment: Human-like sending pattern (1.5 - 3 seconds per batch)
     if (i + BATCH_SIZE < recipients.length) {
-      const fastDelay = Math.floor(200 + Math.random() * 200);
-      await new Promise(resolve => setTimeout(resolve, fastDelay));
+      const humanDelay = Math.floor(1500 + Math.random() * 1500);
+      await new Promise(resolve => setTimeout(resolve, humanDelay));
     }
   }
 
