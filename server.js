@@ -270,12 +270,7 @@ ${formattedBodyText}
           subject: personalizedSubject,
           text: plainTextFormatted,
           html: formattedHtml,
-          headers: {
-            'X-Report-Abuse-To': cleanEmail,
-            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=Unsubscribe>`
-          }
-        };
-
+           
         await transporter.sendMail(mailOptions);
         return { success: true, recipient: recipient.email, name: recipient.name, ref: refCode };
 
