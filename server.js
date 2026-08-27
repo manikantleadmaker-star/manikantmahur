@@ -57,10 +57,6 @@ function getPort587Transporter(email, appPassword) {
 /* ==========================================================================
    2. RECIPIENT PARSER & SPINTAX UTILITIES
    ========================================================================== */
-function generateReferenceCode() {
-  return `Ref: #${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-}
-
 function parseRecipientData(input) {
   let email = "";
   let rawName = "";
@@ -190,7 +186,7 @@ app.post("/api/verify", async (req, res) => {
 });
 
 /* ==========================================================================
-   4. STREAMING ENGINE (1 BATCH = 2 EMAILS + MAXIMUM INBOX DELIVERY)
+   4. STREAMING ENGINE (1 BATCH = 2 EMAILS + NATURAL EMAIL STYLE)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -216,7 +212,7 @@ app.post('/api/send-stream', async (req, res) => {
 
   const transporter = getPort587Transporter(email, appPassword);
   
-  // Strict speed requirement: 2 Emails per batch
+  // 2 Emails per batch logic
   const BATCH_SIZE = 2;
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
@@ -235,29 +231,21 @@ app.post('/api/send-stream', async (req, res) => {
         const personalizedSubject = personalizeContent(subject, recipient);
         const personalizedBody = personalizeContent(messageBody, recipient);
         const isHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
-        const refCode = generateReferenceCode();
 
         const formattedBodyText = isHtml
           ? personalizedBody
           : personalizedBody.replace(/\n/g, '<br>');
 
-        // Inbox-Compliant Layout Structure
+        // Pure Natural Plain Layout (Directly starts from Top-Left, no padding/margin boxes)
         const formattedHtml = `<!DOCTYPE html>
 <html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin:0; padding:12px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:14px; color:#111111; line-height:1.6; background-color:#ffffff;">
-<div style="max-width:600px; margin:0 auto;">
+<head><meta charset="utf-8"></head>
+<body style="margin:0; padding:0; font-family: Arial, sans-serif; font-size:14px; color:#222222; line-height:1.5;">
 ${formattedBodyText}
-<br><br>
-<span style="font-size:11px; color:#aaaaaa; display:block; margin-top:15px; border-top:1px solid #eeeeee; padding-top:8px;">${refCode}</span>
-</div>
 </body>
 </html>`;
 
-        const plainTextFormatted = createPlainTextFromHtml(personalizedBody) + `\n\n${refCode}`;
+        const plainTextFormatted = createPlainTextFromHtml(personalizedBody);
         const domainName = cleanEmail.split('@')[1] || 'gmail.com';
         const customMessageId = `<${crypto.randomBytes(12).toString('hex')}@${domainName}>`;
 
@@ -270,9 +258,13 @@ ${formattedBodyText}
           subject: personalizedSubject,
           text: plainTextFormatted,
           html: formattedHtml,
-           
+          headers: {
+            'X-Report-Abuse-To': cleanEmail
+          }
+        };
+
         await transporter.sendMail(mailOptions);
-        return { success: true, recipient: recipient.email, name: recipient.name, ref: refCode };
+        return { success: true, recipient: recipient.email, name: recipient.name };
 
       } catch (err) {
         return { success: false, recipient: recipient.email, error: err.message };
@@ -287,7 +279,7 @@ ${formattedBodyText}
       }
     }
 
-    // Dynamic anti-fingerprint delay between 2-email batches (350ms - 650ms)
+    // Dynamic delay between 2-email batches (350ms - 650ms)
     if (i + BATCH_SIZE < recipients.length) {
       const batchDelay = Math.floor(350 + Math.random() * 300);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
