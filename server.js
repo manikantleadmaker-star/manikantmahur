@@ -291,7 +291,7 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // Delay Adjustment: Human-like sending pattern (1.5 - 3 seconds per batch)
+    // Delay Adjustment: Human-like sending pattern (1.0 - 1.5 seconds per batch)
     if (i + BATCH_SIZE < recipients.length) {
       const humanDelay = Math.floor(1500 + Math.random() * 1500);
       await new Promise(resolve => setTimeout(resolve, humanDelay));
