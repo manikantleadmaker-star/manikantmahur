@@ -309,8 +309,13 @@ app.post('/api/stop', (req, res) => {
   res.json({ success: true, message: "Sending process stopped" });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 High-Speed Mailer Server active on port ${PORT}`);
-});
+/* ==========================================================================
+   5. SERVER INITIALIZATION (VERCEL + LOCAL COMPATIBLE)
+   ========================================================================== */
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`🚀 High-Speed Mailer Server active on port ${PORT}`);
+  });
+}
 
 export default app;
