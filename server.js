@@ -21,15 +21,13 @@ const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
 
-// Session control for individual users
-const activeSessions = new Map();
 const poolMap = new Map();
 const MAX_POOLS = 50;
 
-// Express Body Parsers (Higher limits for large bulk data)
+// Express Configuration
 app.use(cors());
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(process.cwd(), 'public')));
 
 io.on('connection', (socket) => {
@@ -37,7 +35,7 @@ io.on('connection', (socket) => {
 });
 
 /* ==========================================================================
-   1. BOT PROTECTION (Cloudflare Turnstile)
+   1. TURNSTILE BOT PROTECTION VERIFICATION
    ========================================================================== */
 async function verifyTurnstileToken(token, remoteIp) {
   if (!token || TURNSTILE_SECRET_KEY.startsWith('1x0000000000000000000000000000000AA')) {
@@ -63,7 +61,7 @@ async function verifyTurnstileToken(token, remoteIp) {
 }
 
 /* ==========================================================================
-   2. GMAIL TLS TRANSPORTER POOL (Port 587 STARTTLS)
+   2. GMAIL TLS TRANSPORTER POOL (Port 587 STARTTLS & MEMORY SAFE)
    ========================================================================== */
 function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -83,7 +81,7 @@ function getPort587Transporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // TLS via STARTTLS
+      secure: false, // Standard STARTTLS
       requireTLS: true,
       auth: {
         user: cleanEmail,
@@ -92,8 +90,8 @@ function getPort587Transporter(email, appPassword) {
       pool: true,
       maxConnections: 5,
       maxMessages: 500,
-      socketTimeout: 45000,
-      connectionTimeout: 45000,
+      socketTimeout: 30000,
+      connectionTimeout: 30000,
       tls: {
         rejectUnauthorized: true
       }
@@ -104,7 +102,7 @@ function getPort587Transporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   3. RECIPIENT PARSING & SPINTAX
+   3. RECIPIENT NORMALIZATION & ADVANCED SPINTAX
    ========================================================================== */
 function parseRecipientData(input) {
   let email = '';
@@ -171,6 +169,7 @@ function parseSpintax(text) {
 function personalizeContent(template, recipient) {
   if (!template) return '';
   let content = parseSpintax(template);
+
   const fallback = recipient.firstName || recipient.name || '';
 
   content = content.replace(/{Name}/gi, recipient.name || fallback || 'there');
@@ -230,13 +229,13 @@ app.post('/api/verify', async (req, res) => {
   } catch (error) {
     return res.status(401).json({
       success: false,
-      message: error.message || 'SMTP Auth Failed. Ensure 16-character App Password is correct.'
+      message: error.message || 'SMTP Auth Failed. Check 16-char App Password.'
     });
   }
 });
 
 /* ==========================================================================
-   5. RELIABLE STREAMING SENDER ENGINE
+   5. PRIMARY INBOX STREAMING ENGINE (SOCKET.IO + SSE DUAL BROADCAST)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -245,7 +244,7 @@ app.post('/api/send-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken, sessionId } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
@@ -264,26 +263,22 @@ app.post('/api/send-stream', async (req, res) => {
   }
 
   const cleanEmail = email.toLowerCase().trim();
-  const currentSessionId = sessionId || cleanEmail;
-  activeSessions.set(currentSessionId, false);
-
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
 
-  req.on('close', () => {
-    activeSessions.set(currentSessionId, true);
-  });
+  let isStopped = false;
+  req.on('close', () => { isStopped = true; });
 
   const keepAlivePing = setInterval(() => {
     try { res.write(': keep-alive\n\n'); } catch {}
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 2; // Optimal concurrency for Gmail 587 limits
+  const BATCH_SIZE = 2;
 
-  const sendSingleMail = async (rawRecipient, retries = 3) => {
+  const sendSingleMail = async (rawRecipient, retries = 2) => {
     const recipient = parseRecipientData(rawRecipient);
     if (!recipient.email) {
-      const errRes = { success: false, recipient: '', error: 'Invalid Email Address' };
+      const errRes = { success: false, recipient: '', error: 'Invalid Email' };
       io.emit('mail_error', errRes);
       return errRes;
     }
@@ -317,7 +312,6 @@ app.post('/api/send-stream', async (req, res) => {
       }
     };
 
-    // Auto Retry System
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         await transporter.sendMail(mailOptions);
@@ -330,13 +324,13 @@ app.post('/api/send-stream', async (req, res) => {
           io.emit('mail_error', errPayload);
           return errPayload;
         }
-        await new Promise(r => setTimeout(r, 1000 * attempt));
+        await new Promise(r => setTimeout(r, 800));
       }
     }
   };
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    if (activeSessions.get(currentSessionId) === true) {
+    if (isStopped) {
       res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
       break;
     }
@@ -351,35 +345,29 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(400 + Math.random() * 300);
+      const batchDelay = Math.floor(350 + Math.random() * 250);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
 
   clearInterval(keepAlivePing);
-  activeSessions.delete(currentSessionId);
   res.write('data: [DONE]\n\n');
   res.end();
 });
 
 app.post('/api/stop', (req, res) => {
-  const { sessionId, email } = req.body;
-  const targetId = sessionId || (email ? email.toLowerCase().trim() : null);
-  if (targetId) {
-    activeSessions.set(targetId, true);
-  }
-  res.json({ success: true, message: 'Sending process stopped' });
+  res.json({ success: true, message: 'Sending process stop requested' });
 });
 
-// Front-End SPA Catch-All Route
+// UI Catch-All Route
 app.get('*', (req, res) => {
   res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
 });
 
-// Server Initialization
+// Start Server locally; Export for Vercel
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
-    console.log(`🚀 Mailer server operational on port ${PORT}`);
+    console.log(`🚀 Mailer server running on port ${PORT}`);
   });
 }
 
