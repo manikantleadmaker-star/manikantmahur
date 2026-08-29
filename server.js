@@ -21,10 +21,12 @@ const PORT = Number(process.env.PORT) || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
 
+// Global Session Tracker & Transporter Pool Map
 const activeSessions = new Map();
 const poolMap = new Map();
 const MAX_POOLS = 50;
 
+// Express Configuration
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
@@ -61,7 +63,7 @@ async function verifyTurnstileToken(token, remoteIp) {
 }
 
 /* ==========================================================================
-   2. Gmail Transporter Pool (Port 587 STARTTLS)
+   2. High-Inbox Gmail Transporter Pool (Port 587 STARTTLS)
    ========================================================================== */
 function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -69,6 +71,7 @@ function getPort587Transporter(email, appPassword) {
   const key = `native_${cleanEmail}_${cleanPass}`;
 
   if (!poolMap.has(key)) {
+    // Memory Cache Eviction Strategy
     if (poolMap.size >= MAX_POOLS) {
       const firstKey = poolMap.keys().next().value;
       const oldTransporter = poolMap.get(firstKey);
@@ -81,7 +84,7 @@ function getPort587Transporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false,
+      secure: false, // Standard STARTTLS required for Gmail
       requireTLS: true,
       auth: {
         user: cleanEmail,
@@ -103,7 +106,7 @@ function getPort587Transporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   3. Recipient Parsing & Spintax Engine
+   3. Recipient Parsing, Advanced Spintax & Personalization Engine
    ========================================================================== */
 function parseRecipientData(input) {
   let email = '';
@@ -235,7 +238,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   5. Primary Inbox 2-Batch Stream Engine
+   5. Primary Inbox Streaming Engine (2-Email Batch System)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -278,7 +281,7 @@ app.post('/api/send-stream', async (req, res) => {
 
   const transporter = getPort587Transporter(email, appPassword);
   
-  // Exact 2-Email Batch Concurrency Requirement
+  // 1 Glitch / Batch = 2 Emails (Optimal Speed vs Delivery Ratio)
   const BATCH_SIZE = 2;
 
   const sendSingleMail = async (rawRecipient, retries = 3) => {
@@ -297,8 +300,11 @@ app.post('/api/send-stream', async (req, res) => {
       ? personalizedBody
       : personalizedBody.replace(/\n/g, '<br>');
 
+    // Standard 1-on-1 Clean Body Layout (Avoids Bulk Email Fingerprinting)
     const formattedHtml = `<div dir="ltr">${cleanBodyText}</div>`;
     const plainTextFormatted = createCleanPlainText(personalizedBody);
+    
+    // RFC Compliant Unique Message-ID Generation
     const domainName = cleanEmail.split('@')[1] || 'gmail.com';
     const customMessageId = `<${crypto.randomBytes(16).toString('hex')}@${domainName}>`;
 
@@ -319,6 +325,7 @@ app.post('/api/send-stream', async (req, res) => {
       }
     };
 
+    // Exponential Backoff Auto-Retry System
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         await transporter.sendMail(mailOptions);
@@ -338,14 +345,16 @@ app.post('/api/send-stream', async (req, res) => {
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (activeSessions.get(currentSessionId) === true) {
-      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ success: false, error: 'Sending Process Stopped by User' })}\n\n`);
       break;
     }
 
     const batch = recipients.slice(i, i + BATCH_SIZE);
+    
+    // Micro-Stagger between the 2 emails to match human typing cadence
     const sendPromises = batch.map(async (r, idx) => {
       if (idx > 0) {
-        await new Promise(resolve => setTimeout(resolve, Math.floor(150 + Math.random() * 100)));
+        await new Promise(resolve => setTimeout(resolve, Math.floor(180 + Math.random() * 120)));
       }
       return sendSingleMail(r);
     });
@@ -359,6 +368,7 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     if (i + BATCH_SIZE < recipients.length) {
+      // Natural Pause Between Batches
       const batchDelay = Math.floor(350 + Math.random() * 200);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
@@ -370,13 +380,16 @@ app.post('/api/send-stream', async (req, res) => {
   res.end();
 });
 
+/* ==========================================================================
+   6. Stop Handler & Catch-All Route
+   ========================================================================== */
 app.post('/api/stop', (req, res) => {
   const { sessionId, email } = req.body;
   const targetId = sessionId || (email ? email.toLowerCase().trim() : null);
   if (targetId) {
     activeSessions.set(targetId, true);
   }
-  return res.json({ success: true, message: 'Process stop request sent successfully.' });
+  return res.json({ success: true, message: 'Process stop signal received.' });
 });
 
 app.get('*', (req, res) => {
