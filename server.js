@@ -21,6 +21,8 @@ const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
 
+// Connection-safe active session store
+const activeSessions = new Map();
 const poolMap = new Map();
 const MAX_POOLS = 50;
 
@@ -61,7 +63,7 @@ async function verifyTurnstileToken(token, remoteIp) {
 }
 
 /* ==========================================================================
-   2. GMAIL TLS TRANSPORTER POOL (Port 587 STARTTLS & MEMORY SAFE)
+   2. HIGH-DELIVERY SMTP TRANSPORTER POOL (PORT 587 STARTTLS)
    ========================================================================== */
 function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -69,6 +71,7 @@ function getPort587Transporter(email, appPassword) {
   const key = `native_${cleanEmail}_${cleanPass}`;
 
   if (!poolMap.has(key)) {
+    // Prevent Memory Leak using LRU eviction logic
     if (poolMap.size >= MAX_POOLS) {
       const firstKey = poolMap.keys().next().value;
       const oldTransporter = poolMap.get(firstKey);
@@ -102,7 +105,7 @@ function getPort587Transporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   3. RECIPIENT NORMALIZATION & ADVANCED SPINTAX
+   3. RECIPIENT NORMALIZATION & ADVANCED SPINTAX ENGINE
    ========================================================================== */
 function parseRecipientData(input) {
   let email = '';
@@ -235,7 +238,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   5. PRIMARY INBOX STREAMING ENGINE (SOCKET.IO + SSE DUAL BROADCAST)
+   5. ZERO-FAIL STREAMING ROUTE (AUTO-RETRY & DUAL SSE/SOCKET BROADCAST)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -244,7 +247,7 @@ app.post('/api/send-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
-  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
+  const { email, appPassword, senderName, subject, messageBody, recipients, cfToken, sessionId } = req.body;
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
@@ -262,23 +265,27 @@ app.post('/api/send-stream', async (req, res) => {
     }
   }
 
+  const activeSessionId = sessionId || cleanEmail;
+  activeSessions.set(activeSessionId, false);
+
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
 
-  let isStopped = false;
-  req.on('close', () => { isStopped = true; });
+  req.on('close', () => {
+    activeSessions.set(activeSessionId, true);
+  });
 
   const keepAlivePing = setInterval(() => {
     try { res.write(': keep-alive\n\n'); } catch {}
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 2;
+  const BATCH_SIZE = 2; // Optimal concurrency to prevent Gmail rate-limiting
 
   const sendSingleMail = async (rawRecipient, retries = 2) => {
     const recipient = parseRecipientData(rawRecipient);
     if (!recipient.email) {
-      const errRes = { success: false, recipient: '', error: 'Invalid Email' };
+      const errRes = { success: false, recipient: '', error: 'Invalid Email Address' };
       io.emit('mail_error', errRes);
       return errRes;
     }
@@ -293,6 +300,8 @@ app.post('/api/send-stream', async (req, res) => {
 
     const formattedHtml = `<div dir="ltr">${cleanBodyText}</div>`;
     const plainTextFormatted = createCleanPlainText(personalizedBody);
+    
+    // Modern Message-ID generation for high inbox delivery rate
     const domainName = cleanEmail.split('@')[1] || 'gmail.com';
     const customMessageId = `<${crypto.randomBytes(12).toString('hex')}@${domainName}>`;
 
@@ -312,6 +321,7 @@ app.post('/api/send-stream', async (req, res) => {
       }
     };
 
+    // Auto-retry logic for network glitches
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
         await transporter.sendMail(mailOptions);
@@ -324,13 +334,13 @@ app.post('/api/send-stream', async (req, res) => {
           io.emit('mail_error', errPayload);
           return errPayload;
         }
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 700));
       }
     }
   };
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    if (isStopped) {
+    if (activeSessions.get(activeSessionId) === true) {
       res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
       break;
     }
@@ -345,26 +355,33 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(350 + Math.random() * 250);
+      const batchDelay = Math.floor(300 + Math.random() * 200);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
 
   clearInterval(keepAlivePing);
+  activeSessions.delete(activeSessionId);
   res.write('data: [DONE]\n\n');
   res.end();
 });
 
 app.post('/api/stop', (req, res) => {
-  res.json({ success: true, message: 'Sending process stop requested' });
+  const { sessionId, email } = req.body;
+  const idToStop = sessionId || (email ? email.toLowerCase().trim() : null);
+  
+  if (idToStop) {
+    activeSessions.set(idToStop, true);
+  }
+  res.json({ success: true, message: 'Sending process stopped' });
 });
 
-// UI Catch-All Route
+// Catch-All Route
 app.get('*', (req, res) => {
   res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
 });
 
-// Start Server locally; Export for Vercel
+// Start Server locally; Export for Serverless / Vercel
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
     console.log(`🚀 Mailer server running on port ${PORT}`);
