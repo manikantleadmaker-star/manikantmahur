@@ -175,7 +175,6 @@ function parseSpintax(text) {
 function cleanHumanTypography(text) {
   if (!text) return '';
   let sanitized = String(text).trim();
-  // Bot pattern fixes (e.g. "Hello ! " -> "Hello, ")
   sanitized = sanitized.replace(/^Hello\s*!\s*/i, 'Hello, ');
   sanitized = sanitized.replace(/^Hi\s*!\s*/i, 'Hi, ');
   sanitized = sanitized.replace(/^Hey\s*!\s*/i, 'Hey, ');
@@ -249,7 +248,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   PRIMARY INBOX BULLETPROOF STREAMING ENGINE (1 BLITCH = 5 EMAILS)
+   PRIMARY INBOX BULLETPROOF STREAMING ENGINE (1 BATCH = 5 EMAILS)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
