@@ -18,7 +18,7 @@ const io = new Server(server, {
 });
 
 const PORT = Number(process.env.PORT) || 3000;
-const SITE_PASSWORD = process.env.SITE_PASSWORD || '';
+const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 
 const activeSessions = new Map();
