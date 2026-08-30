@@ -20,7 +20,7 @@ const io = new Server(server, {
 const PORT = Number(process.env.PORT) || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 
-// Global Transporter Cache & Session State
+// Cache System
 const activeSessions = new Map();
 const poolMap = new Map();
 
@@ -32,7 +32,7 @@ app.use(express.static(path.join(process.cwd(), 'public')));
 io.on('connection', () => {});
 
 /* ==========================================================================
-   1. Modern Nodemailer Transporter (STARTTLS Port 587)
+   1. High Performance SMTP Transporter Pool (Port 587 STARTTLS)
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -43,15 +43,15 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // STARTTLS use karein (Gmail Primary Inbox ke liye best)
+      secure: false, // High Delivery TLS
       requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 3,
-      maxMessages: 100,
+      maxConnections: 10, // Increased for 5-batch concurrency
+      maxMessages: 500,
       socketTimeout: 30000,
       connectionTimeout: 30000
     });
@@ -62,7 +62,7 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   2. Plain Text Generator (Primary Inbox Boost)
+   2. Plain Text Generator (Required for Primary Inbox Landing)
    ========================================================================== */
 function generatePlainText(htmlContent) {
   if (!htmlContent) return '';
@@ -79,7 +79,33 @@ function generatePlainText(htmlContent) {
 }
 
 /* ==========================================================================
-   3. Email Streaming Route (Human Behavior Emulation)
+   3. Essential Authentication Routes
+   ========================================================================== */
+app.post('/api/auth', (req, res) => {
+  const { password } = req.body;
+  if (password === SITE_PASSWORD) {
+    return res.json({ success: true, message: 'Authorized' });
+  }
+  return res.status(401).json({ success: false, message: 'Unauthorized Password' });
+});
+
+app.post('/api/verify', async (req, res) => {
+  const { email, appPassword } = req.body;
+  if (!email || !appPassword) {
+    return res.status(400).json({ success: false, message: 'Credentials missing' });
+  }
+
+  try {
+    const transporter = getTransporter(email, appPassword);
+    await transporter.verify();
+    return res.json({ success: true, message: 'SMTP Verified Successfully' });
+  } catch (error) {
+    return res.status(401).json({ success: false, message: error.message });
+  }
+});
+
+/* ==========================================================================
+   4. High Speed Email Stream Engine (5 Emails / Glitch Batch)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -105,19 +131,15 @@ app.post('/api/send-stream', async (req, res) => {
 
   const transporter = getTransporter(email, appPassword);
   
-  // High Inbox Delays: Ek baar mein 1 mail + Random Human Delay
-  for (let i = 0; i < recipients.length; i++) {
-    if (activeSessions.get(currentSessionId) === true) {
-      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
-      break;
+  // 1 Glitch / Batch = 5 Emails Parallel
+  const BATCH_SIZE = 5;
+
+  const sendSingleMail = async (rawTarget) => {
+    const targetEmail = (typeof rawTarget === 'object' ? rawTarget.email : rawTarget).trim();
+    if (!targetEmail || !targetEmail.includes('@')) {
+      return { success: false, recipient: targetEmail || '', error: 'Invalid Email' };
     }
 
-    const rawTarget = recipients[i];
-    const targetEmail = (typeof rawTarget === 'object' ? rawTarget.email : rawTarget).trim();
-
-    if (!targetEmail || !targetEmail.includes('@')) continue;
-
-    // RFC Compliant Unique Message ID Generator
     const domainName = cleanEmail.split('@')[1] || 'gmail.com';
     const uniqueMessageId = `<${crypto.randomBytes(12).toString('hex')}.${Date.now()}@${domainName}>`;
 
@@ -126,12 +148,12 @@ app.post('/api/send-stream', async (req, res) => {
       to: targetEmail,
       replyTo: cleanEmail,
       subject: subject,
-      html: `<div style="font-family: sans-serif; font-size: 15px; color: #111111;">${messageBody}</div>`,
-      text: generatePlainText(messageBody), // Plain text fallback
+      html: `<div dir="ltr" style="font-family: sans-serif; font-size: 15px; color: #111111;">${messageBody}</div>`,
+      text: generatePlainText(messageBody),
       messageId: uniqueMessageId,
       date: new Date(),
       headers: {
-        'X-Mailer': 'Microsoft Outlook 16.0', // Standard mail client header
+        'X-Mailer': 'Microsoft Outlook 16.0',
         'Importance': 'normal'
       }
     };
@@ -140,17 +162,35 @@ app.post('/api/send-stream', async (req, res) => {
       await transporter.sendMail(mailOptions);
       const result = { success: true, recipient: targetEmail };
       io.emit('mail_sent', result);
-      res.write(`data: ${JSON.stringify(result)}\n\n`);
+      return result;
     } catch (err) {
       const errResult = { success: false, recipient: targetEmail, error: err.message };
       io.emit('mail_error', errResult);
-      res.write(`data: ${JSON.stringify(errResult)}\n\n`);
+      return errResult;
+    }
+  };
+
+  for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
+    if (activeSessions.get(currentSessionId) === true) {
+      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+      break;
     }
 
-    // Natural Delay: Har mail ke beech 1.0 se 1.5 second ka gap (Human Behavior)
-    if (i < recipients.length - 1) {
-      const humanDelay = Math.floor(1000 + Math.random() * 1000);
-      await new Promise((resolve) => setTimeout(resolve, humanDelay));
+    const batch = recipients.slice(i, i + BATCH_SIZE);
+    
+    // Process 5 emails at the exact same time
+    const batchPromises = batch.map((target) => sendSingleMail(target));
+    const results = await Promise.allSettled(batchPromises);
+
+    for (const resItem of results) {
+      if (resItem.status === 'fulfilled' && resItem.value) {
+        res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+      }
+    }
+
+    // Micro pause between batches for smooth streaming
+    if (i + BATCH_SIZE < recipients.length) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
   }
 
@@ -170,8 +210,10 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
 
 export default app;
