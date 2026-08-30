@@ -348,9 +348,9 @@ app.post('/api/send-stream', async (req, res) => {
       res.write(`data: ${JSON.stringify(errPayload)}\n\n`);
     }
 
-    // Human delay between each email (1.0 to 1.5 seconds) to pass Gmail/Outlook filters
+    // Human delay between each email (0.5 to 1.0 seconds) to pass Gmail/Outlook filters
     if (i < recipients.length - 1) {
-      const humanDelay = Math.floor(1000 + Math.random() * 1000);
+      const humanDelay = Math.floor(500 + Math.random() * 500);
       await new Promise(resolve => setTimeout(resolve, humanDelay));
     }
   }
