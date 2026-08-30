@@ -32,7 +32,7 @@ app.use(express.static(path.join(process.cwd(), 'public')));
 io.on('connection', () => {});
 
 /* ==========================================================================
-   1. High-Performance SMTP Transporter Pool (Primary Inbox Optimized)
+   1. High-Performance Transporter Pool
    ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -43,17 +43,17 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // TLS Start (Best for Primary Inbox)
+      secure: false, // STARTTLS (Best for Primary Inbox)
       requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 10, // Supports high-concurrency batch sending
-      maxMessages: 1000,
-      socketTimeout: 45000,
-      connectionTimeout: 45000
+      maxConnections: 5,
+      maxMessages: 500,
+      socketTimeout: 30000,
+      connectionTimeout: 30000
     });
 
     poolMap.set(key, transporter);
@@ -62,7 +62,7 @@ function getTransporter(email, appPassword) {
 }
 
 /* ==========================================================================
-   2. Plain Text Generator (Crucial for Spam Filter Bypass)
+   2. Plain Text Generator (Required for Spam Bypass)
    ========================================================================== */
 function generatePlainText(htmlContent) {
   if (!htmlContent) return '';
@@ -79,7 +79,7 @@ function generatePlainText(htmlContent) {
 }
 
 /* ==========================================================================
-   3. Essential Authentication & Verification Routes
+   3. Essential Auth Routes
    ========================================================================== */
 app.post('/api/auth', (req, res) => {
   const { password } = req.body;
@@ -105,12 +105,14 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   4. High-Speed 5-Batch Parallel Streaming Engine (100% Delivery Fix)
+   4. Bulletproof Multi-Batch Streaming Engine (Fixed Freeze Issue)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
+  // Setup SSE Headers correctly
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
   const { email, appPassword, senderName, subject, messageBody, recipients, sessionId } = req.body;
@@ -130,70 +132,73 @@ app.post('/api/send-stream', async (req, res) => {
   });
 
   const transporter = getTransporter(email, appPassword);
-  
-  // 1 Glitch = Exact 5 Emails Together
   const BATCH_SIZE = 5;
 
-  // Single Mail Send Function with Primary Inbox Boost Headers
+  // Function to send 1 email (Never Throws Error - Safe Execution)
   const sendSingleMail = async (rawTarget) => {
-    const targetEmail = (typeof rawTarget === 'object' ? rawTarget.email : rawTarget).trim();
-    if (!targetEmail || !targetEmail.includes('@')) {
-      return { success: false, recipient: targetEmail || '', error: 'Invalid Email Address' };
-    }
-
-    const domainName = cleanEmail.split('@')[1] || 'gmail.com';
-    const uniqueMessageId = `<${crypto.randomBytes(16).toString('hex')}.${Date.now()}@${domainName}>`;
-
-    const mailOptions = {
-      from: senderName ? `"${senderName}" <${cleanEmail}>` : cleanEmail,
-      to: targetEmail,
-      replyTo: cleanEmail,
-      subject: subject,
-      html: `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family: Arial, sans-serif; font-size: 15px; color: #222222; line-height: 1.5;"><div dir="ltr">${messageBody}</div></body></html>`,
-      text: generatePlainText(messageBody),
-      messageId: uniqueMessageId,
-      date: new Date(),
-      headers: {
-        'X-Mailer': 'Outlook-Express/7.0 (MSN 6.1; Windows NT 10.0)',
-        'X-Priority': '3',
-        'Importance': 'Normal',
-        'MIME-Version': '1.0'
-      }
-    };
-
+    let targetEmail = '';
     try {
+      targetEmail = (typeof rawTarget === 'object' ? rawTarget.email : rawTarget).trim();
+      if (!targetEmail || !targetEmail.includes('@')) {
+        return { success: false, recipient: targetEmail || 'Unknown', error: 'Invalid Email Format' };
+      }
+
+      const domainName = cleanEmail.split('@')[1] || 'gmail.com';
+      const uniqueMessageId = `<${crypto.randomBytes(12).toString('hex')}.${Date.now()}@${domainName}>`;
+
+      const mailOptions = {
+        from: senderName ? `"${senderName}" <${cleanEmail}>` : cleanEmail,
+        to: targetEmail,
+        replyTo: cleanEmail,
+        subject: subject,
+        html: `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family: sans-serif; font-size: 15px; color: #111111;"><div dir="ltr">${messageBody}</div></body></html>`,
+        text: generatePlainText(messageBody),
+        messageId: uniqueMessageId,
+        date: new Date(),
+        headers: {
+          'X-Mailer': 'Microsoft Outlook Express 16.0',
+          'X-Priority': '3',
+          'Importance': 'Normal'
+        }
+      };
+
       await transporter.sendMail(mailOptions);
       const result = { success: true, recipient: targetEmail };
       io.emit('mail_sent', result);
       return result;
     } catch (err) {
-      const errResult = { success: false, recipient: targetEmail, error: err.message };
+      const errResult = { success: false, recipient: targetEmail || 'Unknown', error: err.message || 'Send Failed' };
       io.emit('mail_error', errResult);
       return errResult;
     }
   };
 
-  // Process all recipients in batches of 5 until ALL are sent
+  // Loop through ALL recipients in batches of 5
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
+    // Check if user clicked Stop
     if (activeSessions.get(currentSessionId) === true) {
       res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
       break;
     }
 
     const currentBatch = recipients.slice(i, i + BATCH_SIZE);
-    
-    // Trigger 5 emails simultaneously
-    const batchTasks = currentBatch.map((recipient) => sendSingleMail(recipient));
-    const batchResults = await Promise.all(batchTasks);
 
-    // Write stream response for all 5 sent mails
-    for (const resResult of batchResults) {
-      res.write(`data: ${JSON.stringify(resResult)}\n\n`);
+    // Run 5 emails in parallel without breaking on failure
+    const batchPromises = currentBatch.map(recipient => sendSingleMail(recipient));
+    const batchResults = await Promise.allSettled(batchPromises);
+
+    // Send status to UI for each of the 5 emails
+    for (const resItem of batchResults) {
+      if (resItem.status === 'fulfilled' && resItem.value) {
+        res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+      } else if (resItem.status === 'rejected') {
+        res.write(`data: ${JSON.stringify({ success: false, recipient: 'Failed Recipient', error: resItem.reason?.message || 'Error' })}\n\n`);
+      }
     }
 
-    // Micro-delay between batches to keep SMTP socket healthy
+    // Small delay between batches to ensure connection stays alive & SMTP server doesn't rate-limit
     if (i + BATCH_SIZE < recipients.length) {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
   }
 
