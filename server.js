@@ -147,9 +147,9 @@ app.post('/api/send-stream', async (req, res) => {
       res.write(`data: ${JSON.stringify(errResult)}\n\n`);
     }
 
-    // Natural Delay: Har mail ke beech 1.5 se 3 second ka gap (Human Behavior)
+    // Natural Delay: Har mail ke beech 1.0 se 1.5 second ka gap (Human Behavior)
     if (i < recipients.length - 1) {
-      const humanDelay = Math.floor(1500 + Math.random() * 1500);
+      const humanDelay = Math.floor(1000 + Math.random() * 1000);
       await new Promise((resolve) => setTimeout(resolve, humanDelay));
     }
   }
