@@ -100,7 +100,7 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 6, // 6 Simultaneous Active Connections
+      maxConnections: 6, // 6 Active Connections simultaneously
       maxMessages: 500,
       socketTimeout: 30000,
       connectionTimeout: 30000
@@ -248,7 +248,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   OPTIMIZED INBOX ENGINE (6 PARALLEL MAILS WITH SAFE SPACING)
+   OPTIMIZED INBOX ENGINE (EXACT 6 MAILS PARALLEL BATCHING)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -284,7 +284,7 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 6; // Concurrent batch of 6
+  const BATCH_SIZE = 6; // Har baar exact 6 mails ek sath bheje jaayenge
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -306,9 +306,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
-        // Micro jitter (50ms - 150ms) to ensure distinct connection timestamps per thread
+        // Micro jitter (60ms - 120ms) taaki connections spam filter trigger na karein
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(50 + Math.random() * 100)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(60 + Math.random() * 60)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -316,31 +316,16 @@ app.post('/api/send-stream', async (req, res) => {
         const hasHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
 
         const cleanRawText = createCleanPlainText(personalizedBody);
-        const plainTextFormatted = `\n${cleanRawText}`;
-
-        // Webmail Standard Clean HTML Structure
-        const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.5; margin-top: 10px;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`;
-
-        // Unique RFC-Compliant Message-ID & Client Identifiers
-        const domainHost = cleanEmail.split('@')[1] || 'gmail.com';
-        const randomId = Math.random().toString(36).substring(2, 11);
-        const customMessageId = `<${Date.now()}.${randomId}@${domainHost}>`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
           to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
           replyTo: cleanEmail,
-          date: new Date(),
-          messageId: customMessageId,
           subject: personalizedSubject,
-          html: cleanHtmlFormatted,
-          text: plainTextFormatted,
+          text: cleanRawText,
+          html: `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
           textEncoding: 'quoted-printable',
-          encoding: 'utf-8',
-          headers: {
-            'X-Mailer': 'Gmail Webmail',
-            'X-Priority': '3 (Normal)'
-          }
+          encoding: 'utf-8'
         };
 
         await transporter.sendMail(mailOptions);
@@ -364,9 +349,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // Safe 800ms - 1500ms delay between 6-mail batches to prevent Gmail spam flags
+    // 6 Mails bhejne ke baad 1 se 2 second ka safe break (Anti-Spam Delay)
     if (i + BATCH_SIZE < recipients.length) {
-      const safeBatchDelay = Math.floor(800 + Math.random() * 700);
+      const safeBatchDelay = Math.floor(1000 + Math.random() * 1000);
       await new Promise(resolve => setTimeout(resolve, safeBatchDelay));
     }
   }
@@ -395,7 +380,7 @@ app.get('*', (req, res) => {
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
-    console.log(`🚀 Safe Inbox Mailer running on port ${PORT}`);
+    console.log(`🚀 Safe Engine Active on Port ${PORT}`);
   });
 }
 
