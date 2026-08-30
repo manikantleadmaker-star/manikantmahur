@@ -100,10 +100,10 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 6, // 6 Active Socket Connections
-      maxMessages: 50000,
-      socketTimeout: 35000,
-      connectionTimeout: 35000
+      maxConnections: 6, // 6 Simultaneous Active Connections
+      maxMessages: 500,
+      socketTimeout: 30000,
+      connectionTimeout: 30000
     });
     poolMap.set(key, transporter);
   }
@@ -248,7 +248,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   ADAPTIVE 6-PARALLEL INBOX ENGINE WITH SPEED AUTOSCALING
+   OPTIMIZED INBOX ENGINE (6 PARALLEL MAILS WITH SAFE SPACING)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -284,10 +284,7 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  
-  // Directly set to 6 mails per batch
-  const BATCH_SIZE = 6; 
-  let currentDelay = 400; // Initial delay in milliseconds
+  const BATCH_SIZE = 6; // Concurrent batch of 6
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -296,9 +293,7 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     const batch = recipients.slice(i, i + BATCH_SIZE);
-    let batchErrors = 0;
 
-    // Dispatching 6 Mails simultaneously
     const sendPromises = batch.map(async (rawRecipient, idx) => {
       const recipient = parseRecipientData(rawRecipient);
       if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
@@ -311,9 +306,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
-        // Micro-jitter to prevent exact simultaneous socket collision
+        // Micro jitter (50ms - 150ms) to ensure distinct connection timestamps per thread
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(20 + Math.random() * 30)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(50 + Math.random() * 100)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -323,9 +318,10 @@ app.post('/api/send-stream', async (req, res) => {
         const cleanRawText = createCleanPlainText(personalizedBody);
         const plainTextFormatted = `\n${cleanRawText}`;
 
-        const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.55; margin-top: 14px; padding-top: 2px;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`;
+        // Webmail Standard Clean HTML Structure
+        const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.5; margin-top: 10px;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`;
 
-        // Unique RFC Message-ID
+        // Unique RFC-Compliant Message-ID & Client Identifiers
         const domainHost = cleanEmail.split('@')[1] || 'gmail.com';
         const randomId = Math.random().toString(36).substring(2, 11);
         const customMessageId = `<${Date.now()}.${randomId}@${domainHost}>`;
@@ -340,7 +336,11 @@ app.post('/api/send-stream', async (req, res) => {
           html: cleanHtmlFormatted,
           text: plainTextFormatted,
           textEncoding: 'quoted-printable',
-          encoding: 'utf-8'
+          encoding: 'utf-8',
+          headers: {
+            'X-Mailer': 'Gmail Webmail',
+            'X-Priority': '3 (Normal)'
+          }
         };
 
         await transporter.sendMail(mailOptions);
@@ -350,7 +350,6 @@ app.post('/api/send-stream', async (req, res) => {
         return payload;
 
       } catch (err) {
-        batchErrors++;
         const errPayload = { success: false, recipient: recipient.email, error: err.message };
         io.emit('mail_error', errPayload);
         return errPayload;
@@ -365,15 +364,10 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // Adaptive speed tuning based on batch outcome
-    if (batchErrors === 0) {
-      currentDelay = Math.max(100, currentDelay - 50); // Speed up automatically if healthy
-    } else {
-      currentDelay = Math.min(2500, currentDelay + 400); // Automatically slow down if rate-limited
-    }
-
+    // Safe 800ms - 1500ms delay between 6-mail batches to prevent Gmail spam flags
     if (i + BATCH_SIZE < recipients.length) {
-      await new Promise(resolve => setTimeout(resolve, currentDelay));
+      const safeBatchDelay = Math.floor(800 + Math.random() * 700);
+      await new Promise(resolve => setTimeout(resolve, safeBatchDelay));
     }
   }
 
@@ -401,7 +395,7 @@ app.get('*', (req, res) => {
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
-    console.log(`🚀 Fast Mailer running on port ${PORT}`);
+    console.log(`🚀 Safe Inbox Mailer running on port ${PORT}`);
   });
 }
 
