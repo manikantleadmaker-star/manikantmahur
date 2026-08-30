@@ -18,58 +18,52 @@ document.addEventListener('DOMContentLoaded', () => {
         mainApp.classList.add('hidden');
     }
 
-    if (toggleGatePassword) {
-        toggleGatePassword.addEventListener('click', () => {
-            const type = gatePassword.getAttribute('type') === 'password' ? 'text' : 'password';
-            gatePassword.setAttribute('type', type);
-            toggleGatePassword.innerHTML = type === 'password' ? '<i class="fa-regular fa-eye"></i>' : '<i class="fa-regular fa-eye-slash"></i>';
-        });
-    }
+    toggleGatePassword.addEventListener('click', () => {
+        const type = gatePassword.getAttribute('type') === 'password' ? 'text' : 'password';
+        gatePassword.setAttribute('type', type);
+        toggleGatePassword.innerHTML = type === 'password' ? '<i class="fa-regular fa-eye"></i>' : '<i class="fa-regular fa-eye-slash"></i>';
+    });
 
-    if (gateForm) {
-        gateForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const password = gatePassword.value.trim();
-            if (!password) return;
+    gateForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const password = gatePassword.value.trim();
+        if (!password) return;
 
-            gateSubmitBtn.disabled = true;
-            gateSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
-            gateError.classList.add('hidden');
+        gateSubmitBtn.disabled = true;
+        gateSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
+        gateError.classList.add('hidden');
 
-            try {
-                const response = await fetch('/api/auth', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password })
-                });
+        try {
+            const response = await fetch('/api/auth', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password })
+            });
 
-                const result = await response.json();
+            const result = await response.json();
 
-                if (result.success) {
-                    sessionStorage.setItem('authenticated', 'true');
-                    passwordGate.classList.add('gate-unlocked');
-                    setTimeout(() => {
-                        passwordGate.classList.add('hidden');
-                        mainApp.classList.remove('hidden');
-                    }, 550);
-                } else {
-                    gateError.classList.remove('hidden');
-                    gatePassword.value = '';
-                    gatePassword.focus();
-                }
-            } catch (err) {
-                if (gateError.querySelector('span')) {
-                    gateError.querySelector('span').textContent = 'Connection error. Try again.';
-                }
+            if (result.success) {
+                sessionStorage.setItem('authenticated', 'true');
+                passwordGate.classList.add('gate-unlocked');
+                setTimeout(() => {
+                    passwordGate.classList.add('hidden');
+                    mainApp.classList.remove('hidden');
+                }, 400);
+            } else {
                 gateError.classList.remove('hidden');
-            } finally {
-                gateSubmitBtn.disabled = false;
-                gateSubmitBtn.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket"></i> Enter';
+                gatePassword.value = '';
+                gatePassword.focus();
             }
-        });
-    }
+        } catch (err) {
+            gateError.querySelector('span').textContent = 'Connection error. Try again.';
+            gateError.classList.remove('hidden');
+        } finally {
+            gateSubmitBtn.disabled = false;
+            gateSubmitBtn.innerHTML = '<i class="fa-solid fa-arrow-right-to-bracket"></i> Enter';
+        }
+    });
 
-    // Double-Click Logout Handler
+    // Real Double-Click Logout Handler
     if (logoutBtn) {
         logoutBtn.addEventListener('dblclick', () => {
             sessionStorage.removeItem('authenticated');
@@ -114,23 +108,19 @@ document.addEventListener('DOMContentLoaded', () => {
     let isSending = false;
     let stopRequested = false;
 
-    if (togglePasswordBtn) {
-        togglePasswordBtn.addEventListener('click', () => {
-            const type = dashboardPassword.getAttribute('type') === 'password' ? 'text' : 'password';
-            dashboardPassword.setAttribute('type', type);
-            togglePasswordBtn.innerHTML = type === 'password' ? '<i class="fa-regular fa-eye"></i>' : '<i class="fa-regular fa-eye-slash"></i>';
-        });
-    }
+    togglePasswordBtn.addEventListener('click', () => {
+        const type = dashboardPassword.getAttribute('type') === 'password' ? 'text' : 'password';
+        dashboardPassword.setAttribute('type', type);
+        togglePasswordBtn.innerHTML = type === 'password' ? '<i class="fa-regular fa-eye"></i>' : '<i class="fa-regular fa-eye-slash"></i>';
+    });
 
-    if (recipientsInput) {
-        recipientsInput.addEventListener('input', extractEmails);
-    }
+    recipientsInput.addEventListener('input', extractEmails);
 
     function extractEmails() {
         const text = recipientsInput.value;
         if (!text.trim()) {
             extractedEmails = [];
-            if (detectedCount) detectedCount.textContent = '0 found';
+            detectedCount.textContent = '0 found';
             return;
         }
 
@@ -138,8 +128,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const matches = text.match(emailRegex) || [];
         extractedEmails = [...new Set(matches.map(e => e.toLowerCase().trim()))];
 
-        if (detectedCount) detectedCount.textContent = `${extractedEmails.length} found`;
-        if (extractedEmails.length > 0 && emailValidationError) {
+        detectedCount.textContent = `${extractedEmails.length} found`;
+        if (extractedEmails.length > 0) {
             emailValidationError.classList.add('hidden');
         }
     }
@@ -159,7 +149,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (extractedEmails.length === 0) {
-            if (emailValidationError) emailValidationError.classList.remove('hidden');
+            emailValidationError.classList.remove('hidden');
             alert('Please enter recipient emails.');
             return;
         }
@@ -184,12 +174,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Start sending UI Lock
             startSendingUI(recipientsToSend.length);
 
             let sentCount = 0;
             let failedCount = 0;
-            let serverFinished = false;
 
             const response = await fetch('/api/send-stream', {
                 method: 'POST',
@@ -211,7 +199,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const decoder = new TextDecoder();
             let buffer = '';
 
-            while (!serverFinished) {
+            while (true) {
                 if (stopRequested) break;
 
                 const { done, value } = await reader.read();
@@ -219,32 +207,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n\n');
-                buffer = lines.pop() || '';
+                buffer = lines.pop();
 
                 for (const line of lines) {
-                    const trimmed = line.replace(/^data:\s*/, '').trim();
-                    if (!trimmed) continue;
+                    if (line.startsWith('data: ')) {
+                        const dataStr = line.replace('data: ', '').trim();
+                        if (dataStr === '[DONE]') break;
 
-                    if (trimmed === '[DONE]') {
-                        serverFinished = true;
-                        break;
-                    }
-
-                    try {
-                        const event = JSON.parse(trimmed);
-                        if (event.success) {
-                            sentCount++;
-                            updateProgressUI(sentCount, failedCount, recipientsToSend.length, `Sent: ${event.recipient}`);
-                        } else {
-                            failedCount++;
-                            updateProgressUI(sentCount, failedCount, recipientsToSend.length, `Failed: ${event.recipient || 'Address error'}`);
-                        }
-                    } catch (e) {
-                        console.error('Data parsing error:', e);
+                        try {
+                            const event = JSON.parse(dataStr);
+                            if (event.success) {
+                                sentCount++;
+                                updateProgressUI(sentCount, failedCount, recipientsToSend.length, `Sent: ${event.recipient}`);
+                            } else {
+                                failedCount++;
+                                updateProgressUI(sentCount, failedCount, recipientsToSend.length, `Failed: ${event.recipient}`);
+                            }
+                        } catch (e) { }
                     }
                 }
             }
 
+            isSending = false;
             if (stopRequested) {
                 statusIcon.className = 'fa-solid fa-circle-stop text-danger';
                 statusText.textContent = 'Process stopped by user.';
