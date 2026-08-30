@@ -20,7 +20,6 @@ const io = new Server(server, {
 const PORT = Number(process.env.PORT) || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 
-// Cache System
 const activeSessions = new Map();
 const poolMap = new Map();
 
@@ -31,9 +30,6 @@ app.use(express.static(path.join(process.cwd(), 'public')));
 
 io.on('connection', () => {});
 
-/* ==========================================================================
-   1. High-Performance Transporter Pool
-   ========================================================================== */
 function getTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cleanPass = appPassword.replace(/\s+/g, '').trim();
@@ -43,17 +39,17 @@ function getTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // STARTTLS (Best for Primary Inbox)
+      secure: false,
       requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 5,
-      maxMessages: 500,
-      socketTimeout: 30000,
-      connectionTimeout: 30000
+      maxConnections: 10,
+      maxMessages: 1000,
+      socketTimeout: 20000,
+      connectionTimeout: 20000
     });
 
     poolMap.set(key, transporter);
@@ -61,9 +57,6 @@ function getTransporter(email, appPassword) {
   return poolMap.get(key);
 }
 
-/* ==========================================================================
-   2. Plain Text Generator (Required for Spam Bypass)
-   ========================================================================== */
 function generatePlainText(htmlContent) {
   if (!htmlContent) return '';
   return htmlContent
@@ -78,9 +71,6 @@ function generatePlainText(htmlContent) {
     .trim();
 }
 
-/* ==========================================================================
-   3. Essential Auth Routes
-   ========================================================================== */
 app.post('/api/auth', (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD) {
@@ -104,11 +94,7 @@ app.post('/api/verify', async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   4. Bulletproof Multi-Batch Streaming Engine (Fixed Freeze Issue)
-   ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
-  // Setup SSE Headers correctly
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
@@ -119,6 +105,7 @@ app.post('/api/send-stream', async (req, res) => {
 
   if (!email || !appPassword || !Array.isArray(recipients) || recipients.length === 0) {
     res.write(`data: ${JSON.stringify({ success: false, error: 'Invalid Input Data' })}\n\n`);
+    res.write('data: [DONE]\n\n');
     res.end();
     return;
   }
@@ -134,13 +121,12 @@ app.post('/api/send-stream', async (req, res) => {
   const transporter = getTransporter(email, appPassword);
   const BATCH_SIZE = 5;
 
-  // Function to send 1 email (Never Throws Error - Safe Execution)
   const sendSingleMail = async (rawTarget) => {
     let targetEmail = '';
     try {
       targetEmail = (typeof rawTarget === 'object' ? rawTarget.email : rawTarget).trim();
       if (!targetEmail || !targetEmail.includes('@')) {
-        return { success: false, recipient: targetEmail || 'Unknown', error: 'Invalid Email Format' };
+        return { success: false, recipient: targetEmail || 'Invalid', error: 'Invalid Email Address' };
       }
 
       const domainName = cleanEmail.split('@')[1] || 'gmail.com';
@@ -167,38 +153,33 @@ app.post('/api/send-stream', async (req, res) => {
       io.emit('mail_sent', result);
       return result;
     } catch (err) {
-      const errResult = { success: false, recipient: targetEmail || 'Unknown', error: err.message || 'Send Failed' };
+      const errResult = { success: false, recipient: targetEmail || 'Failed', error: err.message || 'Send Error' };
       io.emit('mail_error', errResult);
       return errResult;
     }
   };
 
-  // Loop through ALL recipients in batches of 5
+  // 1 Glitch = 5 Emails Parallel. Runs continuously until ALL emails (e.g. 23/25) are finished.
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    // Check if user clicked Stop
     if (activeSessions.get(currentSessionId) === true) {
       res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
       break;
     }
 
     const currentBatch = recipients.slice(i, i + BATCH_SIZE);
-
-    // Run 5 emails in parallel without breaking on failure
     const batchPromises = currentBatch.map(recipient => sendSingleMail(recipient));
     const batchResults = await Promise.allSettled(batchPromises);
 
-    // Send status to UI for each of the 5 emails
     for (const resItem of batchResults) {
       if (resItem.status === 'fulfilled' && resItem.value) {
         res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
-      } else if (resItem.status === 'rejected') {
-        res.write(`data: ${JSON.stringify({ success: false, recipient: 'Failed Recipient', error: resItem.reason?.message || 'Error' })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ success: false, recipient: 'Error', error: 'Batch Failed' })}\n\n`);
       }
     }
 
-    // Small delay between batches to ensure connection stays alive & SMTP server doesn't rate-limit
     if (i + BATCH_SIZE < recipients.length) {
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
 
