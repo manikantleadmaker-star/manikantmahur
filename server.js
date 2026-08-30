@@ -93,14 +93,14 @@ function getPort587Transporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // RFC 3207 STARTTLS Handshake
+      secure: false, // RFC 3207 STARTTLS
       requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 5,
+      maxConnections: 6, // 6 Active Socket Connections
       maxMessages: 50000,
       socketTimeout: 35000,
       connectionTimeout: 35000
@@ -248,7 +248,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   PRIMARY INBOX BULLETPROOF STREAMING ENGINE (1 BATCH = 5 EMAILS)
+   ADAPTIVE 6-PARALLEL INBOX ENGINE WITH SPEED AUTOSCALING
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -284,7 +284,10 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 5;
+  
+  // Directly set to 6 mails per batch
+  const BATCH_SIZE = 6; 
+  let currentDelay = 400; // Initial delay in milliseconds
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -293,7 +296,9 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     const batch = recipients.slice(i, i + BATCH_SIZE);
+    let batchErrors = 0;
 
+    // Dispatching 6 Mails simultaneously
     const sendPromises = batch.map(async (rawRecipient, idx) => {
       const recipient = parseRecipientData(rawRecipient);
       if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
@@ -306,8 +311,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
+        // Micro-jitter to prevent exact simultaneous socket collision
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(300 + Math.random() * 200)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(20 + Math.random() * 30)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -317,14 +323,19 @@ app.post('/api/send-stream', async (req, res) => {
         const cleanRawText = createCleanPlainText(personalizedBody);
         const plainTextFormatted = `\n${cleanRawText}`;
 
-        // 100% Native Webmail & Outlook 11pt Matching (Zero-Spam Layout)
         const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.55; margin-top: 14px; padding-top: 2px;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`;
+
+        // Unique RFC Message-ID
+        const domainHost = cleanEmail.split('@')[1] || 'gmail.com';
+        const randomId = Math.random().toString(36).substring(2, 11);
+        const customMessageId = `<${Date.now()}.${randomId}@${domainHost}>`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
           to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
           replyTo: cleanEmail,
           date: new Date(),
+          messageId: customMessageId,
           subject: personalizedSubject,
           html: cleanHtmlFormatted,
           text: plainTextFormatted,
@@ -339,6 +350,7 @@ app.post('/api/send-stream', async (req, res) => {
         return payload;
 
       } catch (err) {
+        batchErrors++;
         const errPayload = { success: false, recipient: recipient.email, error: err.message };
         io.emit('mail_error', errPayload);
         return errPayload;
@@ -353,9 +365,15 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
+    // Adaptive speed tuning based on batch outcome
+    if (batchErrors === 0) {
+      currentDelay = Math.max(100, currentDelay - 50); // Speed up automatically if healthy
+    } else {
+      currentDelay = Math.min(2500, currentDelay + 400); // Automatically slow down if rate-limited
+    }
+
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(1300 + Math.random() * 600);
-      await new Promise(resolve => setTimeout(resolve, batchDelay));
+      await new Promise(resolve => setTimeout(resolve, currentDelay));
     }
   }
 
@@ -383,7 +401,7 @@ app.get('*', (req, res) => {
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
-    console.log(`🚀 Mailer server running on port ${PORT}`);
+    console.log(`🚀 Fast Mailer running on port ${PORT}`);
   });
 }
 
