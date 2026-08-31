@@ -93,15 +93,15 @@ function getPort587Transporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 587,
-      secure: false, // RFC 3207 STARTTLS
+      secure: false, // TLS via STARTTLS
       requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 6, // 6 Active Connections simultaneously
-      maxMessages: 500,
+      maxConnections: 6, // Exact 6 concurrent socket pools
+      maxMessages: 100,
       socketTimeout: 30000,
       connectionTimeout: 30000
     });
@@ -248,7 +248,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   OPTIMIZED INBOX ENGINE (EXACT 6 MAILS PARALLEL BATCHING)
+   HIGH-INBOX DELIVERABILITY ENGINE (STRICT 6 PARALLEL MAILS)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -284,7 +284,7 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 6; // Har baar exact 6 mails ek sath bheje jaayenge
+  const BATCH_SIZE = 6; // Har iteration me strictly 6 mails ek sath
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -306,9 +306,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
-        // Micro jitter (60ms - 120ms) taaki connections spam filter trigger na karein
+        // Micro-Jitter (100ms - 250ms) so socket connections don't trigger simultaneous automated patterns
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(60 + Math.random() * 60)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(100 + Math.random() * 150)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -323,7 +323,7 @@ app.post('/api/send-stream', async (req, res) => {
           replyTo: cleanEmail,
           subject: personalizedSubject,
           text: cleanRawText,
-          html: `<div style="font-family: Arial, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
+          html: `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #111111; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
           textEncoding: 'quoted-printable',
           encoding: 'utf-8'
         };
@@ -349,9 +349,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // 6 Mails bhejne ke baad 1 se 2 second ka safe break (Anti-Spam Delay)
+    // 6-mail batch ke baad 1.5s - 2.5s delay Gmail IP block aur spam score protection ke liye
     if (i + BATCH_SIZE < recipients.length) {
-      const safeBatchDelay = Math.floor(1000 + Math.random() * 1000);
+      const safeBatchDelay = Math.floor(1500 + Math.random() * 1000);
       await new Promise(resolve => setTimeout(resolve, safeBatchDelay));
     }
   }
@@ -380,7 +380,7 @@ app.get('*', (req, res) => {
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
-    console.log(`🚀 Safe Engine Active on Port ${PORT}`);
+    console.log(`🚀 Optimized Inbox Engine active on port ${PORT}`);
   });
 }
 
