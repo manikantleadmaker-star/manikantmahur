@@ -29,7 +29,17 @@ const accountLimitMap = new Map();
 const MAX_MAILS_PER_ACCOUNT = 25;
 const WINDOW_DURATION_MS = 12 * 60 * 60 * 1000;
 
-function checkAndIncrementLimit(email) {
+// Periodic cleanup to avoid memory leak in accountLimitMap
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, record] of accountLimitMap.entries()) {
+    if (now - record.startTime > WINDOW_DURATION_MS) {
+      accountLimitMap.delete(email);
+    }
+  }
+}, 60 * 60 * 1000); // Clean up every hour
+
+function checkAccountLimit(email) {
   const cleanEmail = email.toLowerCase().trim();
   const now = Date.now();
 
@@ -47,8 +57,15 @@ function checkAndIncrementLimit(email) {
     };
   }
 
-  record.count += 1;
-  return { allowed: true, remaining: MAX_MAILS_PER_ACCOUNT - record.count };
+  return { allowed: true, remaining: MAX_MAILS_PER_ACCOUNT - record.count, record };
+}
+
+function incrementAccountLimit(email) {
+  const cleanEmail = email.toLowerCase().trim();
+  const record = accountLimitMap.get(cleanEmail);
+  if (record) {
+    record.count += 1;
+  }
 }
 
 app.use(cors());
@@ -100,7 +117,7 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 5,
+      maxConnections: 6, // 6 Connections parallel execution ke liye
       maxMessages: 50000,
       socketTimeout: 35000,
       connectionTimeout: 35000
@@ -175,7 +192,6 @@ function parseSpintax(text) {
 function cleanHumanTypography(text) {
   if (!text) return '';
   let sanitized = String(text).trim();
-  // Bot pattern fixes (e.g. "Hello ! " -> "Hello, ")
   sanitized = sanitized.replace(/^Hello\s*!\s*/i, 'Hello, ');
   sanitized = sanitized.replace(/^Hi\s*!\s*/i, 'Hi, ');
   sanitized = sanitized.replace(/^Hey\s*!\s*/i, 'Hey, ');
@@ -249,7 +265,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   PRIMARY INBOX BULLETPROOF STREAMING ENGINE (1 BLITCH = 5 EMAILS)
+   PRIMARY INBOX BULLETPROOF STREAMING ENGINE (1 BATCH = 6 EMAILS)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -285,7 +301,9 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 5;
+  
+  // BATCH SIZE HAR BAAR 6 EMAILS BHEJEGA
+  const BATCH_SIZE = 6; 
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -299,7 +317,7 @@ app.post('/api/send-stream', async (req, res) => {
       const recipient = parseRecipientData(rawRecipient);
       if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
 
-      const quota = checkAndIncrementLimit(cleanEmail);
+      const quota = checkAccountLimit(cleanEmail);
       if (!quota.allowed) {
         const limitPayload = { success: false, recipient: recipient.email, error: quota.message, isLimitFull: true };
         io.emit('mail_error', limitPayload);
@@ -307,8 +325,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
+        // Human-like micro delay between connection dispatches
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(300 + Math.random() * 200)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(150 + Math.random() * 200)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -318,7 +337,6 @@ app.post('/api/send-stream', async (req, res) => {
         const cleanRawText = createCleanPlainText(personalizedBody);
         const plainTextFormatted = `\n${cleanRawText}`;
 
-        // 100% Native Webmail & Outlook 11pt Matching (Zero-Spam Layout)
         const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.55; margin-top: 14px; padding-top: 2px;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`;
 
         const mailOptions = {
@@ -334,6 +352,9 @@ app.post('/api/send-stream', async (req, res) => {
         };
 
         await transporter.sendMail(mailOptions);
+        
+        // Count update after success
+        incrementAccountLimit(cleanEmail);
         
         const payload = { success: true, recipient: recipient.email, name: recipient.name };
         io.emit('mail_sent', payload);
@@ -355,7 +376,7 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(1300 + Math.random() * 600);
+      const batchDelay = Math.floor(1200 + Math.random() * 500);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
