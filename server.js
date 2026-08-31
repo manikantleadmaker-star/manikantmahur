@@ -7,6 +7,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,7 +30,7 @@ const accountLimitMap = new Map();
 const MAX_MAILS_PER_ACCOUNT = 25;
 const WINDOW_DURATION_MS = 12 * 60 * 60 * 1000;
 
-// Periodic cleanup to avoid memory leak in accountLimitMap
+// Automatic Memory Cleanup (Prevents RAM overflow)
 setInterval(() => {
   const now = Date.now();
   for (const [email, record] of accountLimitMap.entries()) {
@@ -37,7 +38,7 @@ setInterval(() => {
       accountLimitMap.delete(email);
     }
   }
-}, 60 * 60 * 1000); // Clean up every hour
+}, 60 * 60 * 1000);
 
 function checkAccountLimit(email) {
   const cleanEmail = email.toLowerCase().trim();
@@ -117,7 +118,7 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 6, // 6 Connections parallel execution ke liye
+      maxConnections: 6, // Optimized for parallel 6-mail dispatch
       maxMessages: 50000,
       socketTimeout: 35000,
       connectionTimeout: 35000
@@ -265,7 +266,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   PRIMARY INBOX BULLETPROOF STREAMING ENGINE (1 BATCH = 6 EMAILS)
+   HIGH-SPEED INBOX BULLETPROOF STREAMING ENGINE (6 MAILS PER BATCH)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -302,8 +303,8 @@ app.post('/api/send-stream', async (req, res) => {
 
   const transporter = getPort587Transporter(email, appPassword);
   
-  // BATCH SIZE HAR BAAR 6 EMAILS BHEJEGA
-  const BATCH_SIZE = 6; 
+  // High Speed Optimization: Send exactly 6 mails parallelly per cycle
+  const BATCH_SIZE = 6;
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -325,9 +326,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
-        // Human-like micro delay between connection dispatches
+        // Human-like Micro Delay (prevents Gmail speed trigger while remaining fast)
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(150 + Math.random() * 200)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(150 + Math.random() * 150)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -337,7 +338,12 @@ app.post('/api/send-stream', async (req, res) => {
         const cleanRawText = createCleanPlainText(personalizedBody);
         const plainTextFormatted = `\n${cleanRawText}`;
 
+        // 100% Native Webmail Format (Optimized for Inbox bypass)
         const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1a1a1a; line-height: 1.55; margin-top: 14px; padding-top: 2px;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`;
+
+        // Unique Message-ID for Spam Filter Avoidance
+        const domainMatch = cleanEmail.split('@')[1] || 'gmail.com';
+        const customMsgId = `<${crypto.randomBytes(12).toString('hex')}@${domainMatch}>`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
@@ -347,15 +353,21 @@ app.post('/api/send-stream', async (req, res) => {
           subject: personalizedSubject,
           html: cleanHtmlFormatted,
           text: plainTextFormatted,
+          messageId: customMsgId,
           textEncoding: 'quoted-printable',
-          encoding: 'utf-8'
+          encoding: 'utf-8',
+          headers: {
+            'X-Mailer': 'Gmail Web Interface',
+            'X-Priority': '3 (Normal)',
+            'Importance': 'Normal'
+          }
         };
 
         await transporter.sendMail(mailOptions);
         
-        // Count update after success
+        // Update 12-hour limit count ONLY on successful delivery
         incrementAccountLimit(cleanEmail);
-        
+
         const payload = { success: true, recipient: recipient.email, name: recipient.name };
         io.emit('mail_sent', payload);
         return payload;
@@ -375,8 +387,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
+    // Adaptive Delay between batches
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(1200 + Math.random() * 500);
+      const batchDelay = Math.floor(1000 + Math.random() * 400);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
