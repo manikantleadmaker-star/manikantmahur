@@ -5,6 +5,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,7 +22,17 @@ const accountLimitMap = new Map();
 const MAX_MAILS_PER_ACCOUNT = 25;
 const WINDOW_DURATION_MS = 12 * 60 * 60 * 1000;
 
-function checkAndIncrementLimit(email) {
+// Automatic Memory Cleanup (Prevents RAM Leaks)
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, record] of accountLimitMap.entries()) {
+    if (now - record.startTime > WINDOW_DURATION_MS) {
+      accountLimitMap.delete(email);
+    }
+  }
+}, 60 * 60 * 1000);
+
+function checkAccountLimit(email) {
   const cleanEmail = email.toLowerCase().trim();
   const now = Date.now();
 
@@ -35,12 +46,19 @@ function checkAndIncrementLimit(email) {
     const remainingMinutes = Math.ceil((WINDOW_DURATION_MS - (now - record.startTime)) / 60000);
     return {
       allowed: false,
-      message: `Limit Full: 12-hour quota reached for ${cleanEmail} (25/25 mails). Available in ${remainingMinutes}m.`
+      message: `Limit Full: 12-hour quota reached for ${cleanEmail} (${record.count}/${MAX_MAILS_PER_ACCOUNT} mails). Available in ${remainingMinutes}m.`
     };
   }
 
-  record.count += 1;
   return { allowed: true, remaining: MAX_MAILS_PER_ACCOUNT - record.count };
+}
+
+function incrementAccountLimit(email) {
+  const cleanEmail = email.toLowerCase().trim();
+  const record = accountLimitMap.get(cleanEmail);
+  if (record) {
+    record.count += 1;
+  }
 }
 
 app.use(cors());
@@ -88,10 +106,10 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 8,
-      maxMessages: 200,
-      socketTimeout: 45000,
-      connectionTimeout: 45000
+      maxConnections: 6, // High Speed Parallel Socket Pool (Max 6)
+      maxMessages: 500,
+      socketTimeout: 30000,
+      connectionTimeout: 30000
     });
     poolMap.set(key, transporter);
   }
@@ -200,7 +218,7 @@ app.post('/api/auth', (req, res) => {
 });
 
 /* ==========================================================================
-   PRIMARY INBOX CLEAN DISPATCH (1 BLITCH = 8 EMAILS)
+   PRIMARY INBOX BULLETPROOF DISPATCH ENGINE (EXACT 6 MAILS BATCHING)
    ========================================================================== */
 app.post('/api/send-batch', async (req, res) => {
   const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
@@ -223,20 +241,22 @@ app.post('/api/send-batch', async (req, res) => {
   try {
     const transporter = getPort587Transporter(email, appPassword);
 
-    // 1 Blitch = 8 Emails parallel execution
-    const sendPromises = recipients.map(async (rawRecipient, idx) => {
+    // Speed Control: Execute batch in 6 emails maximum
+    const batchRecipients = recipients.slice(0, 6);
+
+    const sendPromises = batchRecipients.map(async (rawRecipient, idx) => {
       const recipient = parseRecipientData(rawRecipient);
       if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
 
-      const quota = checkAndIncrementLimit(cleanEmail);
+      const quota = checkAccountLimit(cleanEmail);
       if (!quota.allowed) {
         return { success: false, recipient: recipient.email, error: quota.message, isLimitFull: true };
       }
 
       try {
+        // Fast Human Jitter Delay (120ms - 250ms) to ensure smooth SMTP handshakes
         if (idx > 0) {
-          // Natural Stagger (2.5s - 4.0s) to prevent spam burst flags
-          await new Promise(resolve => setTimeout(resolve, Math.floor(2500 + Math.random() * 1500)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(120 + Math.random() * 130)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -250,20 +270,35 @@ app.post('/api/send-batch', async (req, res) => {
           ? personalizedBody 
           : cleanRawText.replace(/\n/g, '<br>');
 
-        // Exact 11pt, #202124 color, regular 400 weight, standard 14px top gap
+        // Pure Native Webmail Layout (Gmail/Outlook Primary Inbox Matcher)
         const cleanHtmlFormatted = `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 11pt; font-weight: normal; color: #202124; line-height: 1.5; margin-top: 14px; padding-top: 2px;">${formattedHtmlBody}</div>`;
 
-        // Pure Google DKIM/ARC Native Payload
+        // Anti-Spam Custom Message-ID Header
+        const domainMatch = cleanEmail.split('@')[1] || 'gmail.com';
+        const customMsgId = `<${crypto.randomBytes(12).toString('hex')}@${domainMatch}>`;
+
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
           to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
           replyTo: cleanEmail,
           subject: personalizedSubject,
           text: plainTextFormatted,
-          html: cleanHtmlFormatted
+          html: cleanHtmlFormatted,
+          messageId: customMsgId,
+          textEncoding: 'quoted-printable',
+          encoding: 'utf-8',
+          headers: {
+            'X-Mailer': 'Gmail Web Interface',
+            'X-Priority': '3 (Normal)',
+            'Importance': 'Normal'
+          }
         };
 
         await transporter.sendMail(mailOptions);
+        
+        // Count ONLY on Successful Send
+        incrementAccountLimit(cleanEmail);
+
         return { success: true, recipient: recipient.email, name: recipient.name };
 
       } catch (err) {
