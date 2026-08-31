@@ -248,7 +248,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   HIGH-INBOX DELIVERABILITY ENGINE (STRICT 6 PARALLEL MAILS)
+   HIGH-INBOX DELIVERABILITY ENGINE (EXACT 6 MAILS BATCH)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -284,7 +284,7 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 6; // Har iteration me strictly 6 mails ek sath
+  const BATCH_SIZE = 6; // Har iteration me ek baar me exact 6 mails bheje jayenge
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -306,9 +306,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
-        // Micro-Jitter (100ms - 250ms) so socket connections don't trigger simultaneous automated patterns
+        // Humanized micro-jitter (120ms - 280ms) socket flood aur bot detection se bachane ke liye
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(100 + Math.random() * 150)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(120 + Math.random() * 160)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -323,7 +323,10 @@ app.post('/api/send-stream', async (req, res) => {
           replyTo: cleanEmail,
           subject: personalizedSubject,
           text: cleanRawText,
-          html: `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #111111; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
+          html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
+          headers: {
+            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=unsubscribe>`
+          },
           textEncoding: 'quoted-printable',
           encoding: 'utf-8'
         };
@@ -349,9 +352,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // 6-mail batch ke baad 1.5s - 2.5s delay Gmail IP block aur spam score protection ke liye
+    // 6-mail batch ke baad 1.8s - 2.8s dynamic delay Gmail rate limiter safety ke liye
     if (i + BATCH_SIZE < recipients.length) {
-      const safeBatchDelay = Math.floor(1500 + Math.random() * 1000);
+      const safeBatchDelay = Math.floor(1800 + Math.random() * 1000);
       await new Promise(resolve => setTimeout(resolve, safeBatchDelay));
     }
   }
@@ -380,7 +383,7 @@ app.get('*', (req, res) => {
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
   server.listen(PORT, () => {
-    console.log(`🚀 Optimized Inbox Engine active on port ${PORT}`);
+    console.log(`🚀 Optimized Safe Engine active on port ${PORT}`);
   });
 }
 
