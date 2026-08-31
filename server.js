@@ -7,6 +7,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,7 +25,7 @@ const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x000000000000
 const globalSession = { stopRequested: false };
 const poolMap = new Map();
 
-// 12-Hour Rolling Rate Limiter (25 emails per ID)
+// Rate Limiter setup
 const accountLimitMap = new Map();
 const MAX_MAILS_PER_ACCOUNT = 25;
 const WINDOW_DURATION_MS = 12 * 60 * 60 * 1000;
@@ -43,7 +44,7 @@ function checkAndIncrementLimit(email) {
     const remainingMinutes = Math.ceil((WINDOW_DURATION_MS - (now - record.startTime)) / 60000);
     return {
       allowed: false,
-      message: `Limit Full: 12-hour quota reached for ${cleanEmail} (25/25 mails). Available in ${remainingMinutes}m.`
+      message: `Limit Full: 12-hour quota reached for ${cleanEmail} (${MAX_MAILS_PER_ACCOUNT}/${MAX_MAILS_PER_ACCOUNT} mails). Available in ${remainingMinutes}m.`
     };
   }
 
@@ -57,9 +58,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(process.cwd(), 'public')));
 app.use(express.static(path.join(__dirname, 'public')));
 
-io.on('connection', (socket) => {
-  socket.on('disconnect', () => {});
-});
+io.on('connection', () => {});
 
 async function verifyTurnstileToken(token, remoteIp) {
   if (!token || TURNSTILE_SECRET_KEY.startsWith('1x0000000000000000000000000000000AA')) {
@@ -100,9 +99,9 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 6, // Exact 6 concurrent socket pools
+      maxConnections: 6, // 6 parallel connection sockets
       maxMessages: 100,
-      socketTimeout: 30000,
+      socketTimeout: 45000,
       connectionTimeout: 30000
     });
     poolMap.set(key, transporter);
@@ -277,6 +276,7 @@ app.post('/api/send-stream', async (req, res) => {
 
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
+  const domainHost = cleanEmail.split('@')[1] || 'gmail.com';
   globalSession.stopRequested = false;
 
   const keepAlivePing = setInterval(() => {
@@ -284,7 +284,7 @@ app.post('/api/send-stream', async (req, res) => {
   }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 6; // Strictly 6 Mails per Parallel Execution Batch
+  const BATCH_SIZE = 6; // Fixed 6 mails per parallel batch
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested) {
@@ -306,9 +306,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
 
       try {
-        // Micro-jitter (80ms - 180ms) to ensure separate connection handshake timestamps
+        // Safe micro-jitter (120ms - 350ms) to bypass automated burst flags
         if (idx > 0) {
-          await new Promise(resolve => setTimeout(resolve, Math.floor(80 + Math.random() * 100)));
+          await new Promise(resolve => setTimeout(resolve, Math.floor(120 + Math.random() * 230)));
         }
 
         const personalizedSubject = personalizeContent(subject, recipient) || 'Quick note';
@@ -316,6 +316,7 @@ app.post('/api/send-stream', async (req, res) => {
         const hasHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
 
         const cleanRawText = createCleanPlainText(personalizedBody);
+        const uniqueMsgId = `<${Date.now()}.${crypto.randomBytes(6).toString('hex')}@${domainHost}>`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
@@ -323,7 +324,13 @@ app.post('/api/send-stream', async (req, res) => {
           replyTo: cleanEmail,
           subject: personalizedSubject,
           text: cleanRawText,
-          html: `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #1a1a1a; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
+          html: `<div dir="ltr" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; color: #222222; line-height: 1.6;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
+          messageId: uniqueMsgId,
+          headers: {
+            'X-Mailer': 'Gmail / Webmail Interface',
+            'X-Priority': '3 (Normal)',
+            'Importance': 'Normal'
+          },
           textEncoding: 'quoted-printable',
           encoding: 'utf-8'
         };
@@ -349,9 +356,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // Safe 1.2s - 2.0s delay between 6-mail batches for maximum inbox rate preservation
+    // Dynamic 1.5s - 2.8s pause between 6-mail batches for high deliverability
     if (i + BATCH_SIZE < recipients.length) {
-      const safeBatchDelay = Math.floor(1200 + Math.random() * 800);
+      const safeBatchDelay = Math.floor(1500 + Math.random() * 1300);
       await new Promise(resolve => setTimeout(resolve, safeBatchDelay));
     }
   }
