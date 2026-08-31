@@ -5,8 +5,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Secure Mail Console</title>
+    <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom CSS -->
     <link rel="stylesheet" href="style.css">
 </head>
 
@@ -38,11 +41,11 @@
     </div>
 
     <div class="app-container hidden" id="main-app">
-        <!-- Header with Double-Click Logout -->
+        <!-- Header -->
         <header class="app-header">
             <h1><i class="fa-solid fa-shield-halved"></i> Secure Mail Console</h1>
-            <button type="button" id="logout-btn" class="btn-logout" title="Double click to logout">
-                <i class="fa-solid fa-right-from-bracket"></i> Logout (Double Click)
+            <button type="button" id="logout-btn" class="btn btn-outline btn-sm logout-header-btn">
+                <i class="fa-solid fa-arrow-right-from-bracket"></i> Logout (Double Click)
             </button>
         </header>
 
@@ -56,9 +59,7 @@
                 <!-- Composer Card -->
                 <div class="card composer-card fade-in delay-1">
                     <h3><i class="fa-solid fa-pen-to-square"></i> Compose Message</h3>
-                    <form id="compose-form" onsubmit="return false;">
-                        
-                        <!-- Row 1: Sender Name & Your Gmail -->
+                    <form id="compose-form">
                         <div class="form-row">
                             <div class="form-group half">
                                 <label for="sender-name">Sender Name</label>
@@ -69,8 +70,6 @@
                                 <input type="email" id="dashboard-email" placeholder="you@gmail.com" required>
                             </div>
                         </div>
-
-                        <!-- Row 2: App Password & Email Subject -->
                         <div class="form-row">
                             <div class="form-group half">
                                 <label for="dashboard-password">App Password</label>
@@ -84,15 +83,13 @@
                                 <input type="text" id="subject" placeholder="Enter subject line..." required>
                             </div>
                         </div>
-
-                        <!-- Row 3: Message Body -->
                         <div class="form-group flex-grow">
-                            <label for="message-body">Message Body (Plain Text / HTML)</label>
-                            <textarea id="message-body" placeholder="Write your email here... Spintax supported: {Hi|Hello}" required></textarea>
+                            <label for="message-body">Message Body (Plain Text or HTML)</label>
+                            <textarea id="message-body" placeholder="Write your email here... Spintax supported: {Hi|Hello|Hey}" required></textarea>
                         </div>
                         
                         <!-- Anti Spam Turnstile -->
-                        <div class="form-group" style="margin-top: 0.5rem; margin-bottom: 0;">
+                        <div class="form-group" style="margin-top: 1rem;">
                             <label><i class="fa-solid fa-shield-cat"></i> Spam Protection</label>
                             <div class="cf-turnstile" data-sitekey="1x00000000000000000000AA" data-theme="light"></div>
                         </div>
@@ -107,7 +104,7 @@
                             <span class="badge" id="detected-count">0 found</span>
                         </div>
                         <p class="help-subtext">Paste emails (comma separated, new lines, or Excel copy)</p>
-                        <div class="form-group flex-grow" style="margin-bottom: 0;">
+                        <div class="form-group flex-grow">
                             <textarea id="recipients-input" placeholder="john@example.com&#10;jane@example.com"></textarea>
                         </div>
                         <div id="email-validation-error" class="error-message hidden">
