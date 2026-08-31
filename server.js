@@ -324,9 +324,6 @@ app.post('/api/send-stream', async (req, res) => {
           subject: personalizedSubject,
           text: cleanRawText,
           html: `<div dir="ltr" style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #1a1a1a; line-height: 1.5;">${hasHtml ? personalizedBody : cleanRawText.replace(/\n/g, '<br>')}</div>`,
-          headers: {
-            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=unsubscribe>`
-          },
           textEncoding: 'quoted-printable',
           encoding: 'utf-8'
         };
