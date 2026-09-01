@@ -1,22 +1,15 @@
 import 'dotenv/config';
 import express from 'express';
-import http from 'http';
-import { Server } from 'socket.io';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
-import crypto from 'crypto';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-});
-
 const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
@@ -26,8 +19,9 @@ const poolMap = new Map();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(express.static(path.join(process.cwd(), 'public')));
-app.use(express.static(path.join(__dirname, 'public')));
+
+const publicPath = path.join(process.cwd(), 'public');
+app.use(express.static(publicPath));
 
 // Cloudflare Turnstile Verification
 async function verifyTurnstile(token, ip) {
@@ -51,7 +45,7 @@ async function verifyTurnstile(token, ip) {
   }
 }
 
-// SMTP Transporter Pool with Keep-Alive & Direct SSL
+// SMTP Transporter Pool (Optimal Gmail SSL Engine)
 function getSecureTransporter(user, pass) {
   const cleanEmail = user.toLowerCase().trim();
   const cleanPass = pass.replace(/\s+/g, '').trim();
@@ -68,9 +62,9 @@ function getSecureTransporter(user, pass) {
       },
       pool: true,
       maxConnections: 5,
-      maxMessages: Infinity,
-      socketTimeout: 30000,
-      connectionTimeout: 30000
+      maxMessages: 100,
+      socketTimeout: 20000,
+      connectionTimeout: 20000
     });
     poolMap.set(key, transporter);
   }
@@ -121,7 +115,7 @@ function normalizeRecipient(raw) {
   };
 }
 
-// Clean Plain Text Generator (Removes tags and styling cleanly)
+// Clean Plain Text Generator
 function createCleanPlainText(htmlOrText) {
   if (!htmlOrText) return '';
   return htmlOrText
@@ -137,6 +131,22 @@ function createCleanPlainText(htmlOrText) {
     .replace(/&gt;/gi, '>')
     .replace(/\n\s*\n/g, '\n\n')
     .trim();
+}
+
+// High Inbox HTML Wrapper
+function buildInboxHtml(bodyContent) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #222222; background-color: #ffffff;">
+<div style="padding: 15px; max-width: 600px; margin: 0 auto; line-height: 1.6;">
+${bodyContent}
+</div>
+</body>
+</html>`;
 }
 
 // Authentication API
@@ -188,7 +198,6 @@ app.post('/api/send-single', async (req, res) => {
   try {
     const transporter = getSecureTransporter(email, appPassword);
 
-    // Personalization
     const customSubject = processSpintax(subject)
       .replace(/{Name}/gi, rec.name)
       .replace(/{Email}/gi, rec.email);
@@ -200,40 +209,31 @@ app.post('/api/send-single', async (req, res) => {
     const isHtml = /<[a-z][\s\S]*>/i.test(customBody);
     const plainText = createCleanPlainText(customBody);
     
-    // Natural webmail HTML container
-    const cleanHtml = isHtml 
-      ? `<div dir="ltr">${customBody}</div>` 
-      : `<div dir="ltr">${plainText.replace(/\n/g, '<br>')}</div>`;
+    const formattedHtmlBody = isHtml 
+      ? customBody 
+      : plainText.replace(/\n/g, '<br>');
 
-    // Standard RFC-5322 Message-ID
-    const domainPart = cleanEmail.split('@')[1] || 'gmail.com';
-    const messageId = `<${crypto.randomBytes(16).toString('hex')}@${domainPart}>`;
+    const finalHtml = buildInboxHtml(formattedHtmlBody);
 
+    // Natural Clean Mail Options (Strict DKIM & SPF Compliance)
     const mailOptions = {
       from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
       to: rec.name ? `"${rec.name}" <${rec.email}>` : rec.email,
       replyTo: cleanEmail,
-      messageId: messageId,
-      date: new Date(),
-      subject: customSubject || 'Quick update',
+      subject: customSubject || 'Important Update',
       text: plainText,
-      html: cleanHtml,
-      headers: {
-        'X-Mailer': 'Gmail Web/iOS v1.0',
-        'X-Priority': '3'
-      }
+      html: finalHtml
     };
 
     await transporter.sendMail(mailOptions);
-    io.emit('mail_sent', { recipient: rec.email });
     return res.json({ success: true, recipient: rec.email });
 
   } catch (error) {
-    io.emit('mail_error', { recipient: rec.email, error: error.message });
     return res.json({ success: false, recipient: rec.email, error: error.message });
   }
 });
 
+// Serve Static App
 app.get('*', (req, res) => {
   const filePath1 = path.join(process.cwd(), 'public', 'index.html');
   const filePath2 = path.join(__dirname, 'public', 'index.html');
@@ -243,7 +243,7 @@ app.get('*', (req, res) => {
 });
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-  server.listen(PORT, () => {
+  app.listen(PORT, () => {
     console.log(`Server running safely on port ${PORT}`);
   });
 }
