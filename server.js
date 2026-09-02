@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,7 +46,7 @@ async function verifyTurnstile(token, ip) {
   }
 }
 
-// SMTP Transporter Pool (Optimal Gmail SSL Engine)
+// Optimized High-Deliverability Transporter Pool
 function getSecureTransporter(user, pass) {
   const cleanEmail = user.toLowerCase().trim();
   const cleanPass = pass.replace(/\s+/g, '').trim();
@@ -61,7 +62,7 @@ function getSecureTransporter(user, pass) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 5,
+      maxConnections: 3,
       maxMessages: 100,
       socketTimeout: 20000,
       connectionTimeout: 20000
@@ -133,16 +134,16 @@ function createCleanPlainText(htmlOrText) {
     .trim();
 }
 
-// High Inbox HTML Wrapper
+// Webmail Standard Inbox HTML Template
 function buildInboxHtml(bodyContent) {
   return `<!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #222222; background-color: #ffffff;">
-<div style="padding: 15px; max-width: 600px; margin: 0 auto; line-height: 1.6;">
+<body style="margin: 0; padding: 12px; font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif; font-size: 15px; color: #1f2937; background-color: #ffffff; line-height: 1.5;">
+<div style="max-width: 580px; margin: 0 auto;">
 ${bodyContent}
 </div>
 </body>
@@ -174,7 +175,7 @@ app.post('/api/verify', async (req, res) => {
   }
 });
 
-// High-Deliverability Dispatch API
+// Max Deliverability Dispatch Endpoint
 app.post('/api/send-single', async (req, res) => {
   const { email, appPassword, senderName, subject, messageBody, recipient, cfToken } = req.body;
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -208,21 +209,31 @@ app.post('/api/send-single', async (req, res) => {
 
     const isHtml = /<[a-z][\s\S]*>/i.test(customBody);
     const plainText = createCleanPlainText(customBody);
-    
+
     const formattedHtmlBody = isHtml 
       ? customBody 
       : plainText.replace(/\n/g, '<br>');
 
     const finalHtml = buildInboxHtml(formattedHtmlBody);
 
-    // Natural Clean Mail Options (Strict DKIM & SPF Compliance)
+    // Natural Message-ID Structure (DKIM Friendly)
+    const domain = cleanEmail.split('@')[1] || 'mail.gmail.com';
+    const msgId = `<${crypto.randomBytes(12).toString('hex')}@${domain}>`;
+
+    // 100% Inbox Friendly Mail Structure
     const mailOptions = {
       from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
       to: rec.name ? `"${rec.name}" <${rec.email}>` : rec.email,
       replyTo: cleanEmail,
-      subject: customSubject || 'Important Update',
+      subject: customSubject || 'Update',
       text: plainText,
-      html: finalHtml
+      html: finalHtml,
+      messageId: msgId,
+      encoding: 'quoted-printable',
+      headers: {
+        'List-Unsubscribe': `<mailto:${cleanEmail}?subject=unsubscribe>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
+      }
     };
 
     await transporter.sendMail(mailOptions);
