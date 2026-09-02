@@ -3,8 +3,6 @@ import express from 'express';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
-import fs from 'fs';
-import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,19 +13,23 @@ const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
 
+const globalSession = { stopRequested: false };
 const poolMap = new Map();
 
+// Express Configuration
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
 
-const publicPath = path.join(process.cwd(), 'public');
-app.use(express.static(publicPath));
-
+/* ==========================================================================
+   TURNSTILE BOT PROTECTION VERIFICATION
+   ========================================================================== */
 async function verifyTurnstileToken(token, remoteIp) {
-  if (!token || TURNSTILE_SECRET_KEY.startsWith('1x00000000')) {
+  if (!token || TURNSTILE_SECRET_KEY.startsWith('1x0000000000000000000000000000000AA')) {
     return true;
   }
+
   try {
     const formData = new URLSearchParams();
     formData.append('secret', TURNSTILE_SECRET_KEY);
@@ -46,28 +48,38 @@ async function verifyTurnstileToken(token, remoteIp) {
   }
 }
 
-function getSecureTransporter(email, appPassword) {
+/* ==========================================================================
+   GMAIL TLS TRANSPORTER POOL (Port 587 STARTTLS)
+   ========================================================================== */
+function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cleanPass = appPassword.replace(/\s+/g, '').trim();
-  const key = `smtp_${cleanEmail}_${cleanPass}`;
+  const key = `port587_${cleanEmail}_${cleanPass}`;
 
   if (!poolMap.has(key)) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: { user: cleanEmail, pass: cleanPass },
+      port: 587,
+      secure: false, // STARTTLS
+      requireTLS: true,
+      auth: {
+        user: cleanEmail,
+        pass: cleanPass
+      },
       pool: true,
-      maxConnections: 5,
-      maxMessages: 200,
-      socketTimeout: 20000,
-      connectionTimeout: 20000
+      maxConnections: 4, // Aligned with 4-batch processing
+      maxMessages: 500,
+      socketTimeout: 30000,
+      connectionTimeout: 30000
     });
     poolMap.set(key, transporter);
   }
   return poolMap.get(key);
 }
 
+/* ==========================================================================
+   RECIPIENT NORMALIZATION & SPINTAX RESOLVER
+   ========================================================================== */
 function parseRecipientData(input) {
   let email = '';
   let rawName = '';
@@ -107,7 +119,12 @@ function parseRecipientData(input) {
   const firstName = formattedName ? formattedName.split(' ')[0] : '';
   const domain = email.includes('@') ? email.split('@')[1] : '';
 
-  return { email: email.toLowerCase(), name: formattedName, firstName, domain };
+  return {
+    email: email.toLowerCase(),
+    name: formattedName,
+    firstName: firstName,
+    domain: domain
+  };
 }
 
 function parseSpintax(text) {
@@ -131,12 +148,13 @@ function parseSpintax(text) {
 function personalizeContent(template, recipient) {
   if (!template) return '';
   let content = parseSpintax(template);
-  const displayName = recipient.name || recipient.firstName || 'there';
-  const displayFirstName = recipient.firstName || displayName || 'there';
 
-  content = content.replace(/{Name}/gi, displayName);
-  content = content.replace(/{FirstName}/gi, displayFirstName);
-  content = content.replace(/{First_Name}/gi, displayFirstName);
+  const displayName = recipient.name || recipient.firstName || '';
+  const displayFirstName = recipient.firstName || displayName || '';
+
+  content = content.replace(/{Name}/gi, displayName ? displayName : 'there');
+  content = content.replace(/{FirstName}/gi, displayFirstName ? displayFirstName : 'there');
+  content = content.replace(/{First_Name}/gi, displayFirstName ? displayFirstName : 'there');
   content = content.replace(/{Email}/gi, recipient.email);
   content = content.replace(/{Domain}/gi, recipient.domain);
 
@@ -160,27 +178,16 @@ function createPlainTextFromHtml(html) {
     .trim();
 }
 
-function wrapInboxHtml(bodyContent) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; color: #0f172a; line-height: 1.6; background-color: #ffffff;">
-<div style="max-width: 600px; margin: 0 auto;">
-${bodyContent}
-</div>
-</body>
-</html>`;
-}
+/* ==========================================================================
+   API ROUTES
+   ========================================================================== */
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
-// Routes
 app.post('/api/auth', (req, res) => {
   const { password } = req.body;
-  if (password === SITE_PASSWORD || password === 'Y##') {
-    return res.json({ success: true, message: 'Authorized' });
-  }
+  if (password === SITE_PASSWORD) return res.json({ success: true, message: 'Authorized' });
   return res.status(401).json({ success: false, message: 'Unauthorized Password' });
 });
 
@@ -200,7 +207,7 @@ app.post('/api/verify', async (req, res) => {
   }
 
   try {
-    const transporter = getSecureTransporter(email, appPassword);
+    const transporter = getPort587Transporter(email, appPassword);
     await transporter.verify();
     return res.json({ success: true, message: 'SMTP verified successfully' });
   } catch (error) {
@@ -211,10 +218,14 @@ app.post('/api/verify', async (req, res) => {
   }
 });
 
+/* ==========================================================================
+   STREAMING DISPATCH ROUTE (4 Emails Per Batch)
+   ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
   const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -236,48 +247,54 @@ app.post('/api/send-stream', async (req, res) => {
 
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
-  const transporter = getSecureTransporter(email, appPassword);
-  
-  const BATCH_SIZE = 4; // High-Speed Batch Processing
+  globalSession.stopRequested = false;
+
+  const keepAlivePing = setInterval(() => {
+    res.write(': keep-alive\n\n');
+  }, 4000);
+
+  const transporter = getPort587Transporter(email, appPassword);
+  const BATCH_SIZE = 4; // Exact 4 emails per batch
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
+    if (globalSession.stopRequested) {
+      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+      break;
+    }
+
     const batch = recipients.slice(i, i + BATCH_SIZE);
 
     const sendPromises = batch.map(async (rawRecipient) => {
       const recipient = parseRecipientData(rawRecipient);
-      if (!recipient.email || !recipient.email.includes('@')) {
-        return { success: false, recipient: '', error: 'Invalid Email' };
-      }
+      if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
 
       try {
         const personalizedSubject = personalizeContent(subject, recipient);
         const personalizedBody = personalizeContent(messageBody, recipient);
         const isHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
 
-        const innerContent = isHtml ? personalizedBody : personalizedBody.replace(/\n/g, '<br>');
-        const finalHtml = wrapInboxHtml(innerContent);
-        const plainTextFormatted = createPlainTextFromHtml(personalizedBody);
+        // 2-line top gap + 15px font + #0f172a deep dark text
+        let formattedHtml = '';
+        if (isHtml) {
+          formattedHtml = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; color: #0f172a; line-height: 1.65; padding-top: 24px;">${personalizedBody}</div>`;
+        } else {
+          formattedHtml = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; color: #0f172a; line-height: 1.65; padding-top: 24px;">${personalizedBody.replace(/\n/g, '<br>')}</div>`;
+        }
 
-        const domain = cleanEmail.split('@')[1] || 'gmail.com';
-        const msgId = `<${crypto.randomBytes(12).toString('hex')}@${domain}>`;
+        const plainTextFormatted = `\n\n${createPlainTextFromHtml(formattedHtml)}`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
           to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
           replyTo: cleanEmail,
-          subject: personalizedSubject || 'Quick Update',
-          html: finalHtml,
-          text: plainTextFormatted,
-          messageId: msgId,
-          encoding: 'quoted-printable',
-          headers: {
-            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=unsubscribe>`,
-            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click'
-          }
+          subject: personalizedSubject || 'No Subject',
+          html: formattedHtml,
+          text: plainTextFormatted
         };
 
         await transporter.sendMail(mailOptions);
         return { success: true, recipient: recipient.email, name: recipient.name };
+
       } catch (err) {
         return { success: false, recipient: recipient.email, error: err.message };
       }
@@ -291,33 +308,25 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
+    // Delay between 4-email batches
     if (i + BATCH_SIZE < recipients.length) {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      const batchDelay = Math.floor(350 + Math.random() * 50);
+      await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
 
+  clearInterval(keepAlivePing);
   res.write('data: [DONE]\n\n');
   res.end();
 });
 
 app.post('/api/stop', (req, res) => {
-  res.json({ success: true, message: 'Process stop signal received' });
+  globalSession.stopRequested = true;
+  res.json({ success: true, message: 'Sending process stopped' });
 });
 
-app.get('*', (req, res) => {
-  try {
-    const filePath = path.join(process.cwd(), 'public', 'index.html');
-    if (fs.existsSync(filePath)) {
-      return res.sendFile(filePath);
-    }
-  } catch (e) {}
-  return res.status(200).send('OK');
+app.listen(PORT, () => {
+  console.log(`🚀 Mailer server running on port ${PORT}`);
 });
-
-if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-  app.listen(PORT, () => {
-    console.log(`🚀 Mailer server running on port ${PORT}`);
-  });
-}
 
 export default app;
