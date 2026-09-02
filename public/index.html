@@ -4,232 +4,129 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>High Deliverability Mailer Engine</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     body { background-color: #0f172a; color: #f8fafc; padding: 20px; }
-    .container { max-width: 900px; margin: 0 auto; background: #1e293b; padding: 25px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-    h2 { color: #38bdf8; margin-bottom: 20px; font-size: 22px; }
+    .hidden { display: none !important; }
+    .container { max-width: 900px; margin: 0 auto; background: #1e293b; padding: 25px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); position: relative; }
+    h2 { color: #38bdf8; font-size: 22px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px; }
     .full-width { grid-column: span 2; }
     label { font-size: 13px; color: #94a3b8; display: block; margin-bottom: 5px; }
+    .input-wrap { position: relative; }
     input, textarea { width: 100%; padding: 10px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #fff; font-size: 14px; }
+    .toggle-pass { position: absolute; right: 10px; top: 10px; cursor: pointer; color: #94a3b8; }
     input:focus, textarea:focus { outline: none; border-color: #38bdf8; }
     textarea { resize: vertical; }
     .btn-group { display: flex; gap: 10px; margin-top: 15px; }
     button { flex: 1; padding: 12px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; }
-    .btn-verify { background: #3b82f6; color: #fff; }
+    .btn-primary { background: #3b82f6; color: #fff; }
     .btn-send { background: #10b981; color: #fff; }
     .btn-stop { background: #ef4444; color: #fff; }
+    .btn-logout { background: transparent; border: 1px solid #ef4444; color: #ef4444; padding: 6px 12px; font-size: 12px; }
     button:hover { opacity: 0.9; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     .stats { display: flex; justify-content: space-between; background: #0f172a; padding: 12px; border-radius: 6px; margin: 15px 0; font-size: 14px; }
     .stats span { font-weight: bold; }
-    .stat-sent { color: #10b981; }
-    .stat-failed { color: #ef4444; }
-    .logs { background: #000; border: 1px solid #334155; height: 180px; overflow-y: auto; padding: 10px; font-family: monospace; font-size: 12px; border-radius: 6px; }
-    .log-success { color: #4ade80; }
-    .log-error { color: #f87171; }
-    .cf-turnstile { margin-top: 10px; }
+    .stat-sent, .text-success { color: #10b981; }
+    .stat-failed, .text-danger { color: #ef4444; }
+    .text-warning { color: #f59e0b; }
+    .text-primary { color: #3b82f6; }
+    .progress-container { width: 100%; background: #0f172a; height: 8px; border-radius: 4px; overflow: hidden; margin-bottom: 15px; }
+    .progress-bar { width: 0%; height: 100%; background: #10b981; transition: width 0.3s; }
+    .error-msg { color: #f87171; font-size: 12px; margin-top: 5px; }
+    .status-box { font-size: 13px; margin: 10px 0; display: flex; align-items: center; gap: 8px; }
+    .btn-shake { animation: shake 0.4s; }
+    @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
   </style>
 </head>
 <body>
 
-<div class="container">
-  <h2>🚀 Mailer Inbox Engine (Fast Streaming)</h2>
+  <!-- PASSWORD GATE -->
+  <div id="password-gate" class="container" style="max-width: 400px; margin-top: 80px;">
+    <h2><i class="fa-solid fa-lock"></i> System Access</h2>
+    <form id="gate-form" style="margin-top: 15px;">
+      <label>Enter Site Password</label>
+      <div class="input-wrap">
+        <input type="password" id="gate-password" placeholder="Password Required">
+        <span class="toggle-pass" id="toggle-gate-password"><i class="fa-regular fa-eye"></i></span>
+      </div>
+      <div id="gate-error" class="error-msg hidden"><span>Invalid Password. Try again.</span></div>
+      <button type="submit" id="gate-submit-btn" class="btn-primary" style="width:100%; margin-top:15px;">
+        <i class="fa-solid fa-arrow-right-to-bracket"></i> Enter
+      </button>
+    </form>
+  </div>
 
-  <!-- Authentication & Credentials -->
-  <div class="grid">
-    <div>
-      <label>Site Access Password</label>
-      <input type="password" id="sitePassword" value="Y##" placeholder="Enter Access Pass">
+  <!-- MAIN APP -->
+  <div id="main-app" class="container hidden">
+    <div class="header">
+      <h2>🚀 Mailer Inbox Engine</h2>
+      <button id="logout-btn" class="btn-logout" title="Double click to logout">Logout</button>
     </div>
-    <div>
-      <label>Sender Gmail Address</label>
-      <input type="email" id="senderEmail" placeholder="example@gmail.com">
+
+    <div class="grid">
+      <div>
+        <label>Sender Gmail Address</label>
+        <input type="email" id="dashboard-email" placeholder="example@gmail.com">
+      </div>
+      <div>
+        <label>Gmail App Password (16-Digit)</label>
+        <div class="input-wrap">
+          <input type="password" id="dashboard-password" placeholder="xxxx xxxx xxxx xxxx">
+          <span class="toggle-pass" id="toggle-password"><i class="fa-regular fa-eye"></i></span>
+        </div>
+      </div>
+      <div>
+        <label>Sender Name</label>
+        <input type="text" id="sender-name" placeholder="John Doe">
+      </div>
+      <div>
+        <label>Subject (Supports Spintax & Tags)</label>
+        <input type="text" id="subject" placeholder="{Hello|Hi} {Name}, important update">
+      </div>
+      <div class="full-width">
+        <label>Email Body (Supports HTML or Plain Text)</label>
+        <textarea id="message-body" rows="4" placeholder="{Hi|Hey} {Name},&#10;&#10;Here is your update for {Domain}."></textarea>
+      </div>
+      <div class="full-width">
+        <div style="display:flex; justify-content:space-between;">
+          <label>Recipients List (One per line)</label>
+          <span id="detected-count" style="font-size:12px; color:#38bdf8;">0 found</span>
+        </div>
+        <textarea id="recipients-input" rows="4" placeholder="alex@gmail.com&#10;John,john@example.com"></textarea>
+        <div id="email-validation-error" class="error-msg hidden">Please enter valid recipient emails.</div>
+      </div>
     </div>
-    <div>
-      <label>Gmail App Password (16-Digit)</label>
-      <input type="password" id="appPassword" placeholder="xxxx xxxx xxxx xxxx">
+
+    <!-- Turnstile -->
+    <div class="cf-turnstile" data-sitekey="1x0000000000000000000000"></div>
+
+    <div class="status-box">
+      <i id="status-icon" class="fa-solid fa-circle-check text-success"></i>
+      <span id="status-text">System ready</span>
     </div>
-    <div>
-      <label>Sender Name</label>
-      <input type="text" id="senderName" placeholder="John Doe">
+
+    <div class="progress-container">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn-send" id="send-btn"><i class="fa-solid fa-paper-plane"></i> Send All</button>
+      <button class="btn-stop hidden" id="stop-btn"><i class="fa-solid fa-stop"></i> Stop Process</button>
+    </div>
+
+    <div class="stats">
+      <div>Total: <span id="stat-total">0</span></div>
+      <div>Sent: <span id="stat-sent" class="stat-sent">0</span></div>
+      <div>Failed: <span id="stat-failed" class="stat-failed">0</span></div>
+      <div>Remaining: <span id="stat-remaining">0</span></div>
     </div>
   </div>
 
-  <!-- Content Setup -->
-  <div class="grid">
-    <div class="full-width">
-      <label>Subject (Supports Spintax & Tags: {Name}, {Email})</label>
-      <input type="text" id="subject" placeholder="{Hello|Hi} {Name}, important update">
-    </div>
-    <div class="full-width">
-      <label>Email Body (Supports HTML or Plain Text)</label>
-      <textarea id="messageBody" rows="5" placeholder="{Hi|Hey} {Name},&#10;&#10;Here is your update for {Domain}.&#10;&#10;Best regards"></textarea>
-    </div>
-    <div class="full-width">
-      <label>Recipients List (One per line: email OR Name,email)</label>
-      <textarea id="recipients" rows="4" placeholder="alex@gmail.com&#10;John,john@example.com"></textarea>
-    </div>
-  </div>
-
-  <!-- Turnstile Widget -->
-  <div class="cf-turnstile" data-sitekey="1x0000000000000000000000" data-callback="onTurnstileSuccess"></div>
-
-  <!-- Controls -->
-  <div class="btn-group">
-    <button class="btn-verify" onclick="verifySmtp()">Verify Connection</button>
-    <button class="btn-send" id="sendBtn" onclick="startSending()">Start Dispatch</button>
-    <button class="btn-stop" id="stopBtn" onclick="stopSending()" disabled>Stop Process</button>
-  </div>
-
-  <!-- Live Counter -->
-  <div class="stats">
-    <div>Total: <span id="totalCount">0</span></div>
-    <div>Sent: <span id="sentCount" class="stat-sent">0</span></div>
-    <div>Failed: <span id="failedCount" class="stat-failed">0</span></div>
-  </div>
-
-  <!-- Logs Screen -->
-  <div class="logs" id="logBox">
-    <div>[System Ready] Awaiting user command...</div>
-  </div>
-</div>
-
-<script>
-  let cfToken = '';
-  let abortController = null;
-
-  function onTurnstileSuccess(token) {
-    cfToken = token;
-  }
-
-  function appendLog(message, isError = false) {
-    const logBox = document.getElementById('logBox');
-    const item = document.createElement('div');
-    item.className = isError ? 'log-error' : 'log-success';
-    item.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-    logBox.appendChild(item);
-    logBox.scrollTop = logBox.scrollHeight;
-  }
-
-  async function verifySmtp() {
-    const email = document.getElementById('senderEmail').value;
-    const appPassword = document.getElementById('appPassword').value;
-
-    if (!email || !appPassword) return alert('Email and App Password required!');
-
-    appendLog('Verifying SMTP connection...');
-    try {
-      const res = await fetch('/api/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, appPassword, cfToken })
-      });
-      const data = await res.json();
-      if (data.success) {
-        appendLog('SMTP Verified Successfully!');
-      } else {
-        appendLog(`Verification Failed: ${data.message}`, true);
-      }
-    } catch (e) {
-      appendLog(`Error verifying connection: ${e.message}`, true);
-    }
-  }
-
-  async function startSending() {
-    const email = document.getElementById('senderEmail').value;
-    const appPassword = document.getElementById('appPassword').value;
-    const senderName = document.getElementById('senderName').value;
-    const subject = document.getElementById('subject').value;
-    const messageBody = document.getElementById('messageBody').value;
-    const rawRecipients = document.getElementById('recipients').value.trim().split('\n').filter(r => r.trim());
-
-    if (!email || !appPassword || !rawRecipients.length) {
-      return alert('Fill required credentials and recipient list!');
-    }
-
-    document.getElementById('totalCount').textContent = rawRecipients.length;
-    document.getElementById('sentCount').textContent = '0';
-    document.getElementById('failedCount').textContent = '0';
-
-    document.getElementById('sendBtn').disabled = true;
-    document.getElementById('stopBtn').disabled = false;
-
-    appendLog(`Starting dispatch stream for ${rawRecipients.length} recipients...`);
-
-    let sent = 0;
-    let failed = 0;
-
-    abortController = new AbortController();
-
-    try {
-      const response = await fetch('/api/send-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email, appPassword, senderName, subject, messageBody,
-          recipients: rawRecipients, cfToken
-        }),
-        signal: abortController.signal
-      });
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop(); // Keep partial line in buffer
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const dataStr = line.replace('data: ', '').trim();
-            if (dataStr === '[DONE]') {
-              appendLog('Process completed successfully.');
-              break;
-            }
-
-            try {
-              const res = JSON.parse(dataStr);
-              if (res.success) {
-                sent++;
-                document.getElementById('sentCount').textContent = sent;
-                appendLog(`SENT: ${res.recipient}`);
-              } else {
-                failed++;
-                document.getElementById('failedCount').textContent = failed;
-                appendLog(`FAILED: ${res.recipient} (${res.error})`, true);
-              }
-            } catch (e) {}
-          }
-        }
-      }
-    } catch (e) {
-      if (e.name !== 'AbortError') {
-        appendLog(`Stream error: ${e.message}`, true);
-      }
-    } finally {
-      document.getElementById('sendBtn').disabled = false;
-      document.getElementById('stopBtn').disabled = true;
-    }
-  }
-
-  async function stopSending() {
-    if (abortController) {
-      abortController.abort();
-    }
-    await fetch('/api/stop', { method: 'POST' });
-    appendLog('Sending process stopped by user.', true);
-    document.getElementById('sendBtn').disabled = false;
-    document.getElementById('stopBtn').disabled = true;
-  }
-</script>
-
+  <script src="script.js"></script>
 </body>
 </html>
