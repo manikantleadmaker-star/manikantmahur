@@ -67,10 +67,15 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 4, // Aligned with 4-batch processing
+      maxConnections: 4,
       maxMessages: 500,
       socketTimeout: 30000,
-      connectionTimeout: 30000
+      connectionTimeout: 30000,
+      // Anti-Spam TLS settings
+      tls: {
+        ciphers: 'SSLv3',
+        rejectUnauthorized: true
+      }
     });
     poolMap.set(key, transporter);
   }
@@ -219,7 +224,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   STREAMING DISPATCH ROUTE (4 Emails Per Batch)
+   STREAMING DISPATCH ROUTE (Anti-Spam & Crash Safe)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -249,16 +254,26 @@ app.post('/api/send-stream', async (req, res) => {
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
   globalSession.stopRequested = false;
 
+  let isClientConnected = true;
+  req.on('close', () => {
+    isClientConnected = false;
+    globalSession.stopRequested = true;
+  });
+
   const keepAlivePing = setInterval(() => {
-    res.write(': keep-alive\n\n');
+    if (isClientConnected) {
+      res.write(': keep-alive\n\n');
+    }
   }, 4000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 4; // Exact 4 emails per batch
+  const BATCH_SIZE = 4;
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    if (globalSession.stopRequested) {
-      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+    if (globalSession.stopRequested || !isClientConnected) {
+      if (isClientConnected) {
+        res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+      }
       break;
     }
 
@@ -273,15 +288,18 @@ app.post('/api/send-stream', async (req, res) => {
         const personalizedBody = personalizeContent(messageBody, recipient);
         const isHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
 
-        // 2-line top gap + 15px font + #0f172a deep dark text
         let formattedHtml = '';
         if (isHtml) {
-          formattedHtml = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; color: #0f172a; line-height: 1.65; padding-top: 24px;">${personalizedBody}</div>`;
+          formattedHtml = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111827; line-height: 1.6;">${personalizedBody}</div>`;
         } else {
-          formattedHtml = `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; color: #0f172a; line-height: 1.65; padding-top: 24px;">${personalizedBody.replace(/\n/g, '<br>')}</div>`;
+          formattedHtml = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111827; line-height: 1.6;">${personalizedBody.replace(/\n/g, '<br>')}</div>`;
         }
 
-        const plainTextFormatted = `\n\n${createPlainTextFromHtml(formattedHtml)}`;
+        const plainTextFormatted = createPlainTextFromHtml(formattedHtml);
+
+        // Anti-Spam Specific Email Headers
+        const messageIdDomain = cleanEmail.split('@')[1] || 'gmail.com';
+        const uniqueMsgId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${messageIdDomain}>`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
@@ -289,7 +307,13 @@ app.post('/api/send-stream', async (req, res) => {
           replyTo: cleanEmail,
           subject: personalizedSubject || 'No Subject',
           html: formattedHtml,
-          text: plainTextFormatted
+          text: plainTextFormatted,
+          headers: {
+            'Message-ID': uniqueMsgId,
+            'X-Mailer': 'Gmail-WebMailer/1.0',
+            'X-Priority': '3', // Normal Priority (1 or 5 causes spam flag)
+            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=Unsubscribe>`
+          }
         };
 
         await transporter.sendMail(mailOptions);
@@ -302,22 +326,26 @@ app.post('/api/send-stream', async (req, res) => {
 
     const results = await Promise.allSettled(sendPromises);
 
-    for (const resItem of results) {
-      if (resItem.status === 'fulfilled' && resItem.value.recipient) {
-        res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+    if (isClientConnected) {
+      for (const resItem of results) {
+        if (resItem.status === 'fulfilled' && resItem.value.recipient) {
+          res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+        }
       }
     }
 
-    // Delay between 4-email batches
+    // Dynamic Human-like Delay (800ms - 1500ms between batches to prevent Spam trigger)
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(350 + Math.random() * 50);
+      const batchDelay = Math.floor(800 + Math.random() * 700);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
 
   clearInterval(keepAlivePing);
-  res.write('data: [DONE]\n\n');
-  res.end();
+  if (isClientConnected) {
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
 });
 
 app.post('/api/stop', (req, res) => {
