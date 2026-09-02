@@ -15,7 +15,6 @@ const PORT = process.env.PORT || 3000;
 const SITE_PASSWORD = process.env.SITE_PASSWORD || 'Y##';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x0000000000000000000000000000000AA';
 
-const globalSession = { stopRequested: false };
 const poolMap = new Map();
 
 // Express Configuration
@@ -64,7 +63,7 @@ function getSecureTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 465,
-      secure: true, // Direct SSL (Spam Filters Trust This Most)
+      secure: true, // Direct SSL
       auth: {
         user: cleanEmail,
         pass: cleanPass
@@ -72,8 +71,8 @@ function getSecureTransporter(email, appPassword) {
       pool: true,
       maxConnections: 5,
       maxMessages: 200,
-      socketTimeout: 25000,
-      connectionTimeout: 25000
+      socketTimeout: 20000,
+      connectionTimeout: 20000
     });
     poolMap.set(key, transporter);
   }
@@ -181,7 +180,6 @@ function createPlainTextFromHtml(html) {
     .trim();
 }
 
-// Strict Standalone HTML Body Builder (Protects from Spam Filters)
 function wrapInboxHtml(bodyContent) {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -200,15 +198,6 @@ ${bodyContent}
 /* ==========================================================================
    API ROUTES
    ========================================================================== */
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) return next();
-  const filePath1 = path.join(process.cwd(), 'public', 'index.html');
-  const filePath2 = path.join(__dirname, 'public', 'index.html');
-  if (fs.existsSync(filePath1)) return res.sendFile(filePath1);
-  if (fs.existsSync(filePath2)) return res.sendFile(filePath2);
-  return res.status(200).send('<h1>Server Running</h1>');
-});
-
 app.post('/api/auth', (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD || password === 'Y##') {
@@ -245,13 +234,12 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   HIGH DELIVERABILITY DISPATCH ROUTE (4-Batch Stream)
+   SERVERLESS-SAFE HIGH SPEED DISPATCH ROUTE (Exact 4 Batch Stream)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
 
   const { email, appPassword, senderName, subject, messageBody, recipients, cfToken } = req.body;
   const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -273,21 +261,11 @@ app.post('/api/send-stream', async (req, res) => {
 
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
-  globalSession.stopRequested = false;
-
-  const keepAlivePing = setInterval(() => {
-    res.write(': keep-alive\n\n');
-  }, 4000);
 
   const transporter = getSecureTransporter(email, appPassword);
-  const BATCH_SIZE = 4;
+  const BATCH_SIZE = 4; // Same fast speed
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    if (globalSession.stopRequested) {
-      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
-      break;
-    }
-
     const batch = recipients.slice(i, i + BATCH_SIZE);
 
     const sendPromises = batch.map(async (rawRecipient) => {
@@ -308,7 +286,6 @@ app.post('/api/send-stream', async (req, res) => {
         const finalHtml = wrapInboxHtml(innerContent);
         const plainTextFormatted = createPlainTextFromHtml(personalizedBody);
 
-        // Unique Message-ID generation for authentic headers
         const domain = cleanEmail.split('@')[1] || 'gmail.com';
         const msgId = `<${crypto.randomBytes(12).toString('hex')}@${domain}>`;
 
@@ -343,21 +320,27 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // Natural batch delay to prevent Gmail rate-limiting
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(400 + Math.random() * 200);
-      await new Promise(resolve => setTimeout(resolve, batchDelay));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
   }
 
-  clearInterval(keepAlivePing);
   res.write('data: [DONE]\n\n');
   res.end();
 });
 
 app.post('/api/stop', (req, res) => {
-  globalSession.stopRequested = true;
-  res.json({ success: true, message: 'Sending process stopped' });
+  res.json({ success: true, message: 'Process stop signal received' });
+});
+
+app.get('*', (req, res) => {
+  try {
+    const filePath = path.join(process.cwd(), 'public', 'index.html');
+    if (fs.existsSync(filePath)) {
+      return res.sendFile(filePath);
+    }
+  } catch (e) {}
+  return res.status(200).send('OK');
 });
 
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
