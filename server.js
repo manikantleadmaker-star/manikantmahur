@@ -17,7 +17,6 @@ const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '1x000000000000
 
 const poolMap = new Map();
 
-// Express Configuration
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -25,14 +24,10 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const publicPath = path.join(process.cwd(), 'public');
 app.use(express.static(publicPath));
 
-/* ==========================================================================
-   TURNSTILE BOT PROTECTION VERIFICATION
-   ========================================================================== */
 async function verifyTurnstileToken(token, remoteIp) {
   if (!token || TURNSTILE_SECRET_KEY.startsWith('1x00000000')) {
     return true;
   }
-
   try {
     const formData = new URLSearchParams();
     formData.append('secret', TURNSTILE_SECRET_KEY);
@@ -51,9 +46,6 @@ async function verifyTurnstileToken(token, remoteIp) {
   }
 }
 
-/* ==========================================================================
-   GMAIL HIGH-DELIVERABILITY SSL POOL (Port 465 Direct SSL)
-   ========================================================================== */
 function getSecureTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
   const cleanPass = appPassword.replace(/\s+/g, '').trim();
@@ -63,11 +55,8 @@ function getSecureTransporter(email, appPassword) {
     const transporter = nodemailer.createTransport({
       host: 'smtp.gmail.com',
       port: 465,
-      secure: true, // Direct SSL
-      auth: {
-        user: cleanEmail,
-        pass: cleanPass
-      },
+      secure: true,
+      auth: { user: cleanEmail, pass: cleanPass },
       pool: true,
       maxConnections: 5,
       maxMessages: 200,
@@ -79,9 +68,6 @@ function getSecureTransporter(email, appPassword) {
   return poolMap.get(key);
 }
 
-/* ==========================================================================
-   RECIPIENT NORMALIZATION & SPINTAX RESOLVER
-   ========================================================================== */
 function parseRecipientData(input) {
   let email = '';
   let rawName = '';
@@ -121,12 +107,7 @@ function parseRecipientData(input) {
   const firstName = formattedName ? formattedName.split(' ')[0] : '';
   const domain = email.includes('@') ? email.split('@')[1] : '';
 
-  return {
-    email: email.toLowerCase(),
-    name: formattedName,
-    firstName: firstName,
-    domain: domain
-  };
+  return { email: email.toLowerCase(), name: formattedName, firstName, domain };
 }
 
 function parseSpintax(text) {
@@ -150,7 +131,6 @@ function parseSpintax(text) {
 function personalizeContent(template, recipient) {
   if (!template) return '';
   let content = parseSpintax(template);
-
   const displayName = recipient.name || recipient.firstName || 'there';
   const displayFirstName = recipient.firstName || displayName || 'there';
 
@@ -195,9 +175,7 @@ ${bodyContent}
 </html>`;
 }
 
-/* ==========================================================================
-   API ROUTES
-   ========================================================================== */
+// Routes
 app.post('/api/auth', (req, res) => {
   const { password } = req.body;
   if (password === SITE_PASSWORD || password === 'Y##') {
@@ -233,9 +211,6 @@ app.post('/api/verify', async (req, res) => {
   }
 });
 
-/* ==========================================================================
-   SERVERLESS-SAFE HIGH SPEED DISPATCH ROUTE (Exact 4 Batch Stream)
-   ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -261,9 +236,9 @@ app.post('/api/send-stream', async (req, res) => {
 
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
-
   const transporter = getSecureTransporter(email, appPassword);
-  const BATCH_SIZE = 4; // Same fast speed
+  
+  const BATCH_SIZE = 4; // High-Speed Batch Processing
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     const batch = recipients.slice(i, i + BATCH_SIZE);
@@ -279,10 +254,7 @@ app.post('/api/send-stream', async (req, res) => {
         const personalizedBody = personalizeContent(messageBody, recipient);
         const isHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
 
-        const innerContent = isHtml 
-          ? personalizedBody 
-          : personalizedBody.replace(/\n/g, '<br>');
-
+        const innerContent = isHtml ? personalizedBody : personalizedBody.replace(/\n/g, '<br>');
         const finalHtml = wrapInboxHtml(innerContent);
         const plainTextFormatted = createPlainTextFromHtml(personalizedBody);
 
@@ -306,7 +278,6 @@ app.post('/api/send-stream', async (req, res) => {
 
         await transporter.sendMail(mailOptions);
         return { success: true, recipient: recipient.email, name: recipient.name };
-
       } catch (err) {
         return { success: false, recipient: recipient.email, error: err.message };
       }
@@ -321,7 +292,7 @@ app.post('/api/send-stream', async (req, res) => {
     }
 
     if (i + BATCH_SIZE < recipients.length) {
-      await new Promise(resolve => setTimeout(resolve, 300));
+      await new Promise(resolve => setTimeout(resolve, 200));
     }
   }
 
