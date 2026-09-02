@@ -49,7 +49,7 @@ async function verifyTurnstileToken(token, remoteIp) {
 }
 
 /* ==========================================================================
-   GMAIL TLS TRANSPORTER POOL (Port 587 STARTTLS)
+   GMAIL TLS TRANSPORTER POOL (Standard Compliant Setup)
    ========================================================================== */
 function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -61,21 +61,15 @@ function getPort587Transporter(email, appPassword) {
       host: 'smtp.gmail.com',
       port: 587,
       secure: false, // STARTTLS
-      requireTLS: true,
       auth: {
         user: cleanEmail,
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 4,
-      maxMessages: 500,
+      maxConnections: 2, // 2 connections keep activity looking human
+      maxMessages: 200,
       socketTimeout: 30000,
-      connectionTimeout: 30000,
-      // Anti-Spam TLS settings
-      tls: {
-        ciphers: 'SSLv3',
-        rejectUnauthorized: true
-      }
+      connectionTimeout: 30000
     });
     poolMap.set(key, transporter);
   }
@@ -224,7 +218,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   STREAMING DISPATCH ROUTE (Anti-Spam & Crash Safe)
+   STREAMING DISPATCH ROUTE (Anti-Spam & Stable)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -267,7 +261,9 @@ app.post('/api/send-stream', async (req, res) => {
   }, 4000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  const BATCH_SIZE = 4;
+  
+  // Throttle to 2 emails per batch to avoid Gmail automated bulk flags
+  const BATCH_SIZE = 2;
 
   for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
     if (globalSession.stopRequested || !isClientConnected) {
@@ -290,16 +286,12 @@ app.post('/api/send-stream', async (req, res) => {
 
         let formattedHtml = '';
         if (isHtml) {
-          formattedHtml = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111827; line-height: 1.6;">${personalizedBody}</div>`;
+          formattedHtml = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${personalizedBody}</div>`;
         } else {
-          formattedHtml = `<div style="font-family: Arial, sans-serif; font-size: 15px; color: #111827; line-height: 1.6;">${personalizedBody.replace(/\n/g, '<br>')}</div>`;
+          formattedHtml = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${personalizedBody.replace(/\n/g, '<br>')}</div>`;
         }
 
         const plainTextFormatted = createPlainTextFromHtml(formattedHtml);
-
-        // Anti-Spam Specific Email Headers
-        const messageIdDomain = cleanEmail.split('@')[1] || 'gmail.com';
-        const uniqueMsgId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${messageIdDomain}>`;
 
         const mailOptions = {
           from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
@@ -307,13 +299,7 @@ app.post('/api/send-stream', async (req, res) => {
           replyTo: cleanEmail,
           subject: personalizedSubject || 'No Subject',
           html: formattedHtml,
-          text: plainTextFormatted,
-          headers: {
-            'Message-ID': uniqueMsgId,
-            'X-Mailer': 'Gmail-WebMailer/1.0',
-            'X-Priority': '3', // Normal Priority (1 or 5 causes spam flag)
-            'List-Unsubscribe': `<mailto:${cleanEmail}?subject=Unsubscribe>`
-          }
+          text: plainTextFormatted
         };
 
         await transporter.sendMail(mailOptions);
@@ -334,9 +320,9 @@ app.post('/api/send-stream', async (req, res) => {
       }
     }
 
-    // Dynamic Human-like Delay (800ms - 1500ms between batches to prevent Spam trigger)
+    // Human-like delay between batches (2 to 4 seconds)
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(800 + Math.random() * 700);
+      const batchDelay = Math.floor(2000 + Math.random() * 2000);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
