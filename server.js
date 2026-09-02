@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,7 +50,7 @@ async function verifyTurnstileToken(token, remoteIp) {
 }
 
 /* ==========================================================================
-   GMAIL TLS TRANSPORTER POOL (Standard Compliant Setup)
+   GMAIL HIGH-INBOX TRANSPORTER POOL
    ========================================================================== */
 function getPort587Transporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -66,10 +67,14 @@ function getPort587Transporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 2, // 2 connections keep activity looking human
-      maxMessages: 200,
-      socketTimeout: 30000,
-      connectionTimeout: 30000
+      maxConnections: 5, // High throughput concurrency
+      maxMessages: 500,
+      rateLimit: 15, // Smooth bursting rate
+      socketTimeout: 20000,
+      connectionTimeout: 20000,
+      tls: {
+        rejectUnauthorized: true
+      }
     });
     poolMap.set(key, transporter);
   }
@@ -218,7 +223,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   STREAMING DISPATCH ROUTE (Anti-Spam & Stable)
+   HIGH SPEED STREAMING DISPATCH ROUTE (24 Mails per 12-13 Seconds Target)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -246,6 +251,7 @@ app.post('/api/send-stream', async (req, res) => {
 
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
+  const domain = cleanEmail.split('@')[1] || 'gmail.com';
   globalSession.stopRequested = false;
 
   let isClientConnected = true;
@@ -258,14 +264,15 @@ app.post('/api/send-stream', async (req, res) => {
     if (isClientConnected) {
       res.write(': keep-alive\n\n');
     }
-  }, 4000);
+  }, 3000);
 
   const transporter = getPort587Transporter(email, appPassword);
-  
-  // Throttle to 2 emails per batch to avoid Gmail automated bulk flags
-  const BATCH_SIZE = 2;
 
-  for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
+  // Speed logic: Batch of 24, subdivided into sub-batches of 4 parallel requests
+  const MAJOR_BATCH_SIZE = 24; 
+  const SUB_BATCH_SIZE = 4;
+
+  for (let i = 0; i < recipients.length; i += MAJOR_BATCH_SIZE) {
     if (globalSession.stopRequested || !isClientConnected) {
       if (isClientConnected) {
         res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
@@ -273,57 +280,77 @@ app.post('/api/send-stream', async (req, res) => {
       break;
     }
 
-    const batch = recipients.slice(i, i + BATCH_SIZE);
+    const currentMajorBatch = recipients.slice(i, i + MAJOR_BATCH_SIZE);
+    const batchStartTime = Date.now();
 
-    const sendPromises = batch.map(async (rawRecipient) => {
-      const recipient = parseRecipientData(rawRecipient);
-      if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
+    for (let j = 0; j < currentMajorBatch.length; j += SUB_BATCH_SIZE) {
+      if (globalSession.stopRequested || !isClientConnected) break;
 
-      try {
-        const personalizedSubject = personalizeContent(subject, recipient);
-        const personalizedBody = personalizeContent(messageBody, recipient);
-        const isHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
+      const subBatch = currentMajorBatch.slice(j, j + SUB_BATCH_SIZE);
 
-        let formattedHtml = '';
-        if (isHtml) {
-          formattedHtml = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${personalizedBody}</div>`;
-        } else {
-          formattedHtml = `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.5;">${personalizedBody.replace(/\n/g, '<br>')}</div>`;
+      const sendPromises = subBatch.map(async (rawRecipient) => {
+        const recipient = parseRecipientData(rawRecipient);
+        if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
+
+        try {
+          const personalizedSubject = personalizeContent(subject, recipient);
+          const personalizedBody = personalizeContent(messageBody, recipient);
+          const isHtml = /<[a-z][\s\S]*>/i.test(personalizedBody);
+
+          let formattedHtml = '';
+          if (isHtml) {
+            formattedHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.6; margin:0; padding:10px;">${personalizedBody}</body></html>`;
+          } else {
+            formattedHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; color: #222222; line-height: 1.6; margin:0; padding:10px;">${personalizedBody.replace(/\n/g, '<br>')}</body></html>`;
+          }
+
+          const plainTextFormatted = createPlainTextFromHtml(formattedHtml);
+          const randomMsgId = crypto.randomBytes(12).toString('hex');
+
+          // Spam Avoidance Header Standard
+          const mailOptions = {
+            from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
+            to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
+            replyTo: cleanEmail,
+            subject: personalizedSubject || 'No Subject',
+            html: formattedHtml,
+            text: plainTextFormatted,
+            headers: {
+              'Message-ID': `<${randomMsgId}@${domain}>`,
+              'X-Mailer': 'GmailApp/10.0',
+              'X-Priority': '3 (Normal)',
+              'List-Unsubscribe': `<mailto:${cleanEmail}?subject=unsubscribe>`
+            }
+          };
+
+          await transporter.sendMail(mailOptions);
+          return { success: true, recipient: recipient.email, name: recipient.name };
+
+        } catch (err) {
+          return { success: false, recipient: recipient.email, error: err.message };
         }
+      });
 
-        const plainTextFormatted = createPlainTextFromHtml(formattedHtml);
+      const results = await Promise.allSettled(sendPromises);
 
-        const mailOptions = {
-          from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
-          to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
-          replyTo: cleanEmail,
-          subject: personalizedSubject || 'No Subject',
-          html: formattedHtml,
-          text: plainTextFormatted
-        };
-
-        await transporter.sendMail(mailOptions);
-        return { success: true, recipient: recipient.email, name: recipient.name };
-
-      } catch (err) {
-        return { success: false, recipient: recipient.email, error: err.message };
-      }
-    });
-
-    const results = await Promise.allSettled(sendPromises);
-
-    if (isClientConnected) {
-      for (const resItem of results) {
-        if (resItem.status === 'fulfilled' && resItem.value.recipient) {
-          res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+      if (isClientConnected) {
+        for (const resItem of results) {
+          if (resItem.status === 'fulfilled' && resItem.value.recipient) {
+            res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+          }
         }
       }
+
+      // 100ms micro-pause to prevent network frame drop
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    // Human-like delay between batches (2 to 4 seconds)
-    if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(2000 + Math.random() * 2000);
-      await new Promise(resolve => setTimeout(resolve, batchDelay));
+    // Dynamic pacing: Ensure 24 emails take around 12.5 seconds total
+    const elapsedTime = Date.now() - batchStartTime;
+    const targetBatchTime = 12500; // 12.5 seconds
+    if (elapsedTime < targetBatchTime && (i + MAJOR_BATCH_SIZE) < recipients.length) {
+      const remainingDelay = targetBatchTime - elapsedTime;
+      await new Promise(resolve => setTimeout(resolve, remainingDelay));
     }
   }
 
