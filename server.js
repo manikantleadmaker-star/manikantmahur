@@ -4,6 +4,7 @@ import nodemailer from 'nodemailer';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,7 +50,7 @@ async function verifyTurnstileToken(token, remoteIp) {
 }
 
 /* ==========================================================================
-   HIGH-REPUTATION GMAIL TRANSPORTER (Clean Single Connection Pool)
+   HIGH-REPUTATION GMAIL TRANSPORTER (Optimized SSL Connection Pool)
    ========================================================================== */
 function getDirectSSLTransporter(email, appPassword) {
   const cleanEmail = email.toLowerCase().trim();
@@ -66,8 +67,9 @@ function getDirectSSLTransporter(email, appPassword) {
         pass: cleanPass
       },
       pool: true,
-      maxConnections: 1, // Single connection stream prevents Google rate-limit flags
-      maxMessages: Infinity,
+      maxConnections: 5, // High throughput support
+      maxMessages: 500,
+      rateLimit: 15,
       socketTimeout: 30000,
       connectionTimeout: 30000,
       tls: {
@@ -176,8 +178,8 @@ function buildCanonicalEmail(bodyText) {
   const fontStyle = "font-family:Arial,Helvetica,sans-serif;font-size:11pt;color:#222222;line-height:1.5;";
 
   const htmlContent = isHtml
-    ? `<div dir="ltr" style="${fontStyle}">${clean}</div>`
-    : `<div dir="ltr" style="${fontStyle}">${clean.split('\n\n').map(p => `<p style="margin:0 0 16px 0;${fontStyle}">${p.replace(/\n/g, '<br>')}</p>`).join('')}</div>`;
+    ? `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:10px;"><div dir="ltr" style="${fontStyle}">${clean}</div></body></html>`
+    : `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:10px;"><div dir="ltr" style="${fontStyle}">${clean.split('\n\n').map(p => `<p style="margin:0 0 16px 0;${fontStyle}">${p.replace(/\n/g, '<br>')}</p>`).join('')}</div></body></html>`;
 
   return { text: plainText, html: htmlContent };
 }
@@ -225,7 +227,7 @@ app.post('/api/verify', async (req, res) => {
 });
 
 /* ==========================================================================
-   STREAMING DISPATCH ROUTE (Sequential Human Pacing - 100% Inbox Friendly)
+   STREAMING DISPATCH ROUTE (High-Speed Burst: 24 Mails per 12s - 100% Inbox Friendly)
    ========================================================================== */
 app.post('/api/send-stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -253,71 +255,105 @@ app.post('/api/send-stream', async (req, res) => {
 
   const cleanEmail = email.toLowerCase().trim();
   const cleanSenderName = (senderName || '').replace(/["\r\n]/g, '').trim();
+  const domain = cleanEmail.split('@')[1] || 'gmail.com';
   globalSession.stopRequested = false;
 
+  let isClientConnected = true;
+  req.on('close', () => {
+    isClientConnected = false;
+    globalSession.stopRequested = true;
+  });
+
   const keepAlivePing = setInterval(() => {
-    res.write(': keep-alive\n\n');
-  }, 4000);
+    if (isClientConnected) {
+      res.write(': keep-alive\n\n');
+    }
+  }, 3000);
 
   const transporter = getDirectSSLTransporter(email, appPassword);
-  const BATCH_SIZE = 8;
 
-  for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-    if (globalSession.stopRequested) {
-      res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+  const MAJOR_BATCH_SIZE = 24; // Batch Target: 24 emails
+  const SUB_BATCH_SIZE = 4;   // Concurrency: 4 parallel connections per tick
+
+  for (let i = 0; i < recipients.length; i += MAJOR_BATCH_SIZE) {
+    if (globalSession.stopRequested || !isClientConnected) {
+      if (isClientConnected) {
+        res.write(`data: ${JSON.stringify({ success: false, error: 'Stopped by User' })}\n\n`);
+      }
       break;
     }
 
-    const batch = recipients.slice(i, i + BATCH_SIZE);
+    const currentMajorBatch = recipients.slice(i, i + MAJOR_BATCH_SIZE);
+    const batchStartTime = Date.now();
 
-    // Sequential dispatch inside the batch prevents burst firewall triggers
-    for (let j = 0; j < batch.length; j++) {
-      if (globalSession.stopRequested) break;
+    for (let j = 0; j < currentMajorBatch.length; j += SUB_BATCH_SIZE) {
+      if (globalSession.stopRequested || !isClientConnected) break;
 
-      const recipient = parseRecipientData(batch[j]);
-      if (!recipient.email) {
-        res.write(`data: ${JSON.stringify({ success: false, recipient: '', error: 'Invalid Email' })}\n\n`);
-        continue;
+      const subBatch = currentMajorBatch.slice(j, j + SUB_BATCH_SIZE);
+
+      const sendPromises = subBatch.map(async (rawRecipient) => {
+        const recipient = parseRecipientData(rawRecipient);
+        if (!recipient.email) return { success: false, recipient: '', error: 'Invalid Email' };
+
+        try {
+          const personalizedSubject = personalizeContent(subject, recipient);
+          const personalizedBody = personalizeContent(messageBody, recipient);
+          const { text: plainText, html: cleanHtml } = buildCanonicalEmail(personalizedBody);
+
+          const randomMsgId = crypto.randomBytes(12).toString('hex');
+
+          // Spam Avoidance Header Envelope
+          const mailOptions = {
+            from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
+            to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
+            replyTo: cleanEmail,
+            subject: personalizedSubject || 'Update',
+            html: cleanHtml,
+            text: plainText,
+            headers: {
+              'Message-ID': `<${randomMsgId}@${domain}>`,
+              'X-Mailer': 'GmailApp/10.0',
+              'X-Priority': '3 (Normal)',
+              'List-Unsubscribe': `<mailto:${cleanEmail}?subject=unsubscribe>`
+            }
+          };
+
+          await transporter.sendMail(mailOptions);
+          return { success: true, recipient: recipient.email, name: recipient.name };
+
+        } catch (err) {
+          return { success: false, recipient: recipient.email, error: err.message };
+        }
+      });
+
+      const results = await Promise.allSettled(sendPromises);
+
+      if (isClientConnected) {
+        for (const resItem of results) {
+          if (resItem.status === 'fulfilled' && resItem.value.recipient) {
+            res.write(`data: ${JSON.stringify(resItem.value)}\n\n`);
+          }
+        }
       }
 
-      try {
-        const personalizedSubject = personalizeContent(subject, recipient);
-        const personalizedBody = personalizeContent(messageBody, recipient);
-        const { text: plainText, html: cleanHtml } = buildCanonicalEmail(personalizedBody);
-
-        // Native Google Webmail Envelope (Google automatically adds DKIM & Message-ID)
-        const mailOptions = {
-          from: cleanSenderName ? `"${cleanSenderName}" <${cleanEmail}>` : cleanEmail,
-          to: recipient.name ? `"${recipient.name}" <${recipient.email}>` : recipient.email,
-          replyTo: cleanEmail,
-          subject: personalizedSubject || 'Update',
-          html: cleanHtml,
-          text: plainText
-        };
-
-        await transporter.sendMail(mailOptions);
-        res.write(`data: ${JSON.stringify({ success: true, recipient: recipient.email, name: recipient.name })}\n\n`);
-
-      } catch (err) {
-        res.write(`data: ${JSON.stringify({ success: false, recipient: recipient.email, error: err.message })}\n\n`);
-      }
-
-      // Micro-jitter between emails inside the batch (300ms - 500ms)
-      if (j < batch.length - 1) {
-        await new Promise(r => setTimeout(r, Math.floor(300 + Math.random() * 200)));
-      }
+      // Micro-pause to maintain clean connection frames
+      await new Promise(resolve => setTimeout(resolve, 80));
     }
 
-    // Organic cooling pause between 8-email batches (2.5s - 4s)
-    if (i + BATCH_SIZE < recipients.length && !globalSession.stopRequested) {
-      const batchDelay = Math.floor(2500 + Math.random() * 1500);
-      await new Promise(resolve => setTimeout(resolve, batchDelay));
+    // Dynamic Time Synchronizer: Ensures 24 emails take ~12.5 seconds
+    const elapsedTime = Date.now() - batchStartTime;
+    const targetBatchTime = 12500; // 12.5 seconds
+    if (elapsedTime < targetBatchTime && (i + MAJOR_BATCH_SIZE) < recipients.length) {
+      const remainingDelay = targetBatchTime - elapsedTime;
+      await new Promise(resolve => setTimeout(resolve, remainingDelay));
     }
   }
 
   clearInterval(keepAlivePing);
-  res.write('data: [DONE]\n\n');
-  res.end();
+  if (isClientConnected) {
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
 });
 
 app.post('/api/stop', (req, res) => {
