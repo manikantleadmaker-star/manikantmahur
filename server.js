@@ -30,14 +30,20 @@ app.post('/api/auth', loginLimiter, (req, res) => {
 
 function parseSpintax(text) {
     if (!text) return '';
-    return text.replace(/\{([^{}]+)\}/g, (match, choices) => {
+    return text.replace(/\{([^{}]+)\}/g, (_, choices) => {
         const options = choices.split('|');
         return options[Math.floor(Math.random() * options.length)];
     });
 }
 
-function stripHtml(html) {
-    return html.replace(/<[^>]*>?/gm, '').trim();
+function cleanPlainText(html) {
+    if (!html) return '';
+    return html
+        .replace(/<style([\s\S]*?)<\/style>/gi, '')
+        .replace(/<script([\s\S]*?)<\/script>/gi, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 async function verifyTurnstile(token) {
@@ -79,10 +85,11 @@ app.post('/api/send-stream', async (req, res) => {
         res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
 
+    // Maximum performance setup without triggering Gmail connection caps
     const transporter = nodemailer.createTransport({
         service: 'gmail',
         pool: true,
-        maxConnections: 6,
+        maxConnections: 5,
         maxMessages: 100,
         auth: {
             user: email,
@@ -93,7 +100,7 @@ app.post('/api/send-stream', async (req, res) => {
     try {
         await transporter.verify();
     } catch (error) {
-        sendSSE({ type: 'fatal_error', message: 'SMTP Auth Failed. Check Gmail & App Password.' });
+        sendSSE({ type: 'fatal_error', message: 'SMTP Auth Failed. Check Gmail address and App Password.' });
         return res.end();
     }
 
@@ -103,7 +110,8 @@ app.post('/api/send-stream', async (req, res) => {
 
     sendSSE({ type: 'start', total });
 
-    const BATCH_SIZE = 6; // Strict requirement: 6 emails per batch
+    // Processing size tuned for maximum delivery efficiency
+    const BATCH_SIZE = 5;
 
     for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
         const batch = recipients.slice(i, i + BATCH_SIZE);
@@ -111,9 +119,7 @@ app.post('/api/send-stream', async (req, res) => {
         const batchPromises = batch.map(async (recipient) => {
             const dynamicSubject = parseSpintax(subject);
             const dynamicBody = parseSpintax(body);
-            const plainText = stripHtml(dynamicBody);
-            const domain = email.split('@')[1] || 'gmail.com';
-            const uniqueMsgId = `<${Date.now()}.${Math.random().toString(36).substring(2, 9)}@${domain}>`;
+            const plainText = cleanPlainText(dynamicBody);
 
             const mailOptions = {
                 from: `"${senderName}" <${email}>`,
@@ -122,10 +128,7 @@ app.post('/api/send-stream', async (req, res) => {
                 text: plainText,
                 html: dynamicBody,
                 headers: {
-                    'Message-ID': uniqueMsgId,
-                    'X-Mailer': 'SecureMailConsole/1.0',
-                    'X-Priority': '3',
-                    'Auto-Submitted': 'auto-generated'
+                    'X-Entity-Ref-ID': `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
                 }
             };
 
@@ -149,9 +152,9 @@ app.post('/api/send-stream', async (req, res) => {
             }
         });
 
-        // 2-second interval between batches for inbox protection
+        // Mandatory micro-pause between batches to protect domain health
         if (i + BATCH_SIZE < recipients.length) {
-            await new Promise((resolve) => setTimeout(resolve, 2000));
+            await new Promise((resolve) => setTimeout(resolve, 800));
         }
     }
 
