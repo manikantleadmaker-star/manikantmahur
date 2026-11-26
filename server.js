@@ -310,7 +310,7 @@ app.post('/api/send-stream', async (req, res) => {
 
     // Delay between 6-email batches
     if (i + BATCH_SIZE < recipients.length) {
-      const batchDelay = Math.floor(950 + Math.random() * 600);
+      const batchDelay = Math.floor(350 + Math.random() * 500);
       await new Promise(resolve => setTimeout(resolve, batchDelay));
     }
   }
